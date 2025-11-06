@@ -61,15 +61,15 @@ async fn main() {
         .expect("Could not connect to the MQTT topic.");
     info!("✓ Connected and subscribed! Waiting for messages...\n");
 
-    for (i, notification) in connection.iter().enumerate() {
-        match notification {
+    loop {
+        match connection.eventloop.poll().await {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
                 let topic = &publish.topic;
                 let payload = &publish.payload;
 
                 match std::str::from_utf8(payload) {
                     Ok(str_message) => {
-                        info!("Received message nr. {} on topic '{}'", i, topic);
+                        info!("Received message on topic '{}'", topic);
                         debug!("Raw message content: {}", str_message);
 
                         match serde_json::from_str::<DeviceMessage>(str_message) {
@@ -161,7 +161,7 @@ async fn main() {
             Err(e) => {
                 error!("❌ Connection error: {:?}", e);
                 error!("Retrying in 5 seconds...");
-                std::thread::sleep(Duration::from_secs(5));
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
             _ => {} // Ignoruj inne zdarzenia
         }
