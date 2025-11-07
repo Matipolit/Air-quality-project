@@ -29,6 +29,8 @@ const MQTT_COMMAND_TOPIC: &str = "sensors/esp32/command";
 
 const DEVICE_NAME: &str = "esp32-scd40";
 
+const DEFAULT_DEEP_SLEEP_SECONDS: u64 = 300;
+
 fn blink_led(
     led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>,
     times: u8,
@@ -287,6 +289,7 @@ fn perform_get_temp_offset(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<Devi
 }
 
 fn main() -> Result<()> {
+    let mut deep_sleep_seconds = DEFAULT_DEEP_SLEEP_SECONDS;
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
@@ -441,6 +444,13 @@ fn main() -> Result<()> {
         }
         DeviceCommand::SetTempOffset { offset } => perform_set_temp_offset(&mut scd40, offset)?,
         DeviceCommand::GetTempOffset => perform_get_temp_offset(&mut scd40)?,
+        DeviceCommand::SetDeepSleepTime { seconds } => {
+            deep_sleep_seconds = seconds;
+            DevicePayload::SetDeepSleepTimeSuccess { seconds }
+        }
+        DeviceCommand::GetDeepSleepTime => DevicePayload::GetDeepSleepTimeSuccess {
+            seconds: deep_sleep_seconds,
+        },
     };
 
     publish_device_payload(&mut mqtt_client, final_device_payload);
@@ -452,9 +462,11 @@ fn main() -> Result<()> {
     info!("╚════════════════════════════════════════════════════╝");
 
     // Enter deep sleep
-    // let sleep_duration_us: u64 = 5 * 60 * 1000 * 1000; // 5 minutes
-    let sleep_duration_us: u64 = 10 * 1000 * 1000; // 10 seconds for debugging purposes
-    info!("Entering deep sleep for 10 seconds...\n");
+    let sleep_duration_us: u64 = deep_sleep_seconds * 1000 * 1000; // 10 seconds for debugging purposes
+    info!(
+        "Entering deep sleep for {} seconds...\n",
+        deep_sleep_seconds
+    );
     unsafe {
         esp_idf_sys::esp_deep_sleep(sleep_duration_us);
     }

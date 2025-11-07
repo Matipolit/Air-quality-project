@@ -70,6 +70,12 @@ pub enum DevicePayload {
     #[serde(rename = "get_offset_success")]
     GetOffsetSuccess { offset: f32 },
 
+    #[serde(rename = "set_deep_sleep_time_success")]
+    SetDeepSleepTimeSuccess { seconds: u64 },
+
+    #[serde(rename = "get_deep_sleep_time_success")]
+    GetDeepSleepTimeSuccess { seconds: u64 },
+
     #[serde(rename = "get_offset_error")]
     GetOffsetError { detail: String },
 
@@ -99,6 +105,12 @@ pub enum DeviceCommand {
 
     #[serde(rename = "get_temp_offset")]
     GetTempOffset,
+
+    #[serde(rename = "set_deep_sleep_time")]
+    SetDeepSleepTime { seconds: u64 },
+
+    #[serde(rename = "get_deep_sleep_time")]
+    GetDeepSleepTime,
 }
 
 impl Default for DeviceCommand {
@@ -148,10 +160,6 @@ impl DevicePayload {
 
     pub fn frc_success(correction: u16) -> Self {
         Self::FrcSuccess { correction }
-    }
-
-    pub fn alive(uptime_seconds: u64) -> Self {
-        Self::Alive { uptime_seconds }
     }
 }
 

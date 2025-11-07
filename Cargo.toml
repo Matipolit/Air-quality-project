@@ -4,6 +4,7 @@ members = [
     "shared-types",
     "esp32-firmware",
     "rpi-processor",
+    "rpi-commander",
 ]
 
 resolver = "3"

@@ -147,6 +147,18 @@ async fn main() {
                                             uptime_seconds
                                         );
                                     }
+                                    DevicePayload::SetDeepSleepTimeSuccess { seconds } => {
+                                        info!(
+                                            "Set deep sleep time successful with seconds: {}",
+                                            seconds
+                                        );
+                                    }
+                                    DevicePayload::GetDeepSleepTimeSuccess { seconds } => {
+                                        info!(
+                                            "Get deep sleep time successful with seconds: {}",
+                                            seconds
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
