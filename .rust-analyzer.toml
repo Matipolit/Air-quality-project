@@ -1,0 +1,11 @@
+# Exclude esp32-firmware from workspace analysis
+# (it requires ESP32 target which conflicts with other packages)
+linkedProjects = [
+    "shared-types/Cargo.toml",
+    "rpi-processor/Cargo.toml",
+]
+
+# When working specifically in esp32-firmware directory,
+# rust-analyzer will use its local .cargo/config.toml
+cargo.buildScripts.enable = true
+rustc.source = "discover"

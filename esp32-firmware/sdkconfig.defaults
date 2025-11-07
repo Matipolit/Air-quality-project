@@ -1,0 +1,37 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Use this to set FreeRTOS kernel tick frequency to 1000 Hz (100 Hz by default).
+# This allows to use 1 ms granularity for thread sleeps (10 ms by default).
+#CONFIG_FREERTOS_HZ=1000
+
+# Workaround for https://github.com/espressif/esp-idf/issues/7631
+#CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
+#CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=n
+
+# WiFi Configuration
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+
+# WiFi Authentication
+CONFIG_ESP_WIFI_AUTH_OPEN=y
+CONFIG_ESP_WIFI_AUTH_WPA_PSK=y
+CONFIG_ESP_WIFI_AUTH_WPA2_PSK=y
+CONFIG_ESP_WIFI_SCAN_METHOD_ALL_CHANNEL=y
+
+# DISABLE WPA3/PMF - this is the fix!
+CONFIG_ESP_WIFI_SOFTAP_SAE_SUPPORT=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA=n
+CONFIG_ESP_WIFI_ENABLE_WPA3_PERSONAL=n
+
+# Force compatibility mode
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+
+# Increase retry and timeout
+CONFIG_ESP_WIFI_CONN_ITVL_MIN=3
+CONFIG_ESP_WIFI_CONN_ITVL_MAX=5
+
+# Verbose logging (you can disable this after it works)
+CONFIG_LOG_DEFAULT_LEVEL_VERBOSE=n
+CONFIG_LOG_DEFAULT_LEVEL=3

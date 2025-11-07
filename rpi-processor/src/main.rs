@@ -55,7 +55,7 @@ async fn main() {
         MQTT_BROKER_HOST, MQTT_BROKER_PORT
     );
     let (client, mut connection) = Client::new(mqttoptions, 10);
-    info!("Subscribing to mqtt topic");
+    info!("Subscribing to mqtt topic {}", MQTT_TOPIC);
     client
         .subscribe(MQTT_TOPIC, rumqttc::QoS::AtLeastOnce)
         .expect("Could not connect to the MQTT topic.");

@@ -21,10 +21,12 @@ impl DeviceMessage {
         }
     }
 
+    #[cfg(feature = "std")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
+    #[cfg(feature = "std")]
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -45,7 +47,7 @@ pub enum DevicePayload {
     Error { detail: String },
 
     #[serde(rename = "frc_start")]
-    FrcStart { detail: String },
+    FrcStart { target_ppm: u16 },
 
     #[serde(rename = "frc_warmup_complete")]
     FrcWarmupComplete { detail: String },
@@ -54,7 +56,7 @@ pub enum DevicePayload {
     FrcCalibrating { target_ppm: u16 },
 
     #[serde(rename = "frc_success")]
-    FrcSuccess { correction: i16 },
+    FrcSuccess { correction: u16 },
 
     #[serde(rename = "frc_error")]
     FrcError { detail: String },
@@ -99,15 +101,23 @@ pub enum DeviceCommand {
     GetTempOffset,
 }
 
+impl Default for DeviceCommand {
+    fn default() -> Self {
+        DeviceCommand::NoOp
+    }
+}
+
 fn default_frc_ppm() -> u16 {
     422
 }
 
 impl DeviceCommand {
+    #[cfg(feature = "std")]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
+    #[cfg(feature = "std")]
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
@@ -132,13 +142,11 @@ impl DevicePayload {
         }
     }
 
-    pub fn frc_start(detail: impl Into<String>) -> Self {
-        Self::FrcStart {
-            detail: detail.into(),
-        }
+    pub fn frc_start(target_ppm: u16) -> Self {
+        Self::FrcStart { target_ppm }
     }
 
-    pub fn frc_success(correction: i16) -> Self {
+    pub fn frc_success(correction: u16) -> Self {
         Self::FrcSuccess { correction }
     }
 

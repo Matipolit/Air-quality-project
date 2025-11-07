@@ -1,3 +1,6 @@
+.env
+.embuild
+
 # Rust build artifacts
 /target/
 **/target/
