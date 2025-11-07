@@ -5,12 +5,6 @@ use shared_types::{DeviceMessage, DevicePayload};
 
 use log::{self, debug, error, info};
 
-// MQTT Configuration
-const MQTT_BROKER_HOST: &str = "localhost";
-const MQTT_BROKER_PORT: u16 = 1883;
-const MQTT_CLIENT_ID: &str = "raspberry-pi-receiver";
-const MQTT_TOPIC: &str = "sensors/esp32/sensor";
-
 pub async fn save_measurement_to_influx(device: &str, co2: u16, temperature: u32, humidity: f32) {
     let host = env::var("INFLUXDB_URL").expect("INFLUXDB_URL must be set");
     let token = env::var("INFLUXDB_TOKEN").expect("INFLUXDB_TOKEN must be set");
@@ -42,22 +36,29 @@ pub async fn save_measurement_to_influx(device: &str, co2: u16, temperature: u32
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    dotenvy::dotenv().ok();
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let mut mqttoptions = MqttOptions::new(MQTT_CLIENT_ID, MQTT_BROKER_HOST, MQTT_BROKER_PORT);
+    let mqtt_host = env::var("MQTT_BROKER_HOST").unwrap_or_else(|_| "localhost".to_string());
+    let mqtt_port: u16 = env::var("MQTT_BROKER_PORT")
+        .unwrap_or_else(|_| "1883".to_string())
+        .parse()
+        .expect("MQTT_BROKER_PORT must be a valid u16");
+    let mqtt_client_id =
+        env::var("MQTT_CLIENT_ID").unwrap_or_else(|_| "raspberry-pi-receiver".to_string());
+    let mqtt_topic = env::var("MQTT_TOPIC").unwrap_or_else(|_| "sensors/esp32/sensor".to_string());
+
+    let mut mqttoptions = MqttOptions::new(mqtt_client_id, &mqtt_host, mqtt_port);
     mqttoptions.set_keep_alive(Duration::from_secs(30));
     mqttoptions.set_clean_session(true);
 
-    info!(
-        "Connecting to MQTT broker at {}:{}",
-        MQTT_BROKER_HOST, MQTT_BROKER_PORT
-    );
+    info!("Connecting to MQTT broker at {}:{}", &mqtt_host, mqtt_port);
     let (client, mut connection) = Client::new(mqttoptions, 10);
-    info!("Subscribing to mqtt topic {}", MQTT_TOPIC);
+    info!("Subscribing to mqtt topic {}", mqtt_topic);
     client
-        .subscribe(MQTT_TOPIC, rumqttc::QoS::AtLeastOnce)
+        .subscribe(mqtt_topic, rumqttc::QoS::AtLeastOnce)
         .expect("Could not connect to the MQTT topic.");
     info!("✓ Connected and subscribed! Waiting for messages...\n");
 
@@ -98,8 +99,11 @@ async fn main() {
                                     DevicePayload::Error { detail } => {
                                         error!("Error: {}", detail);
                                     }
-                                    DevicePayload::FrcStart { detail } => {
-                                        info!("Force recalibration started: {}", detail);
+                                    DevicePayload::FrcStart { target_ppm } => {
+                                        info!(
+                                            "Force recalibration started with target ppm: {}",
+                                            target_ppm
+                                        );
                                     }
                                     DevicePayload::FrcWarmupComplete { detail } => {
                                         info!("Force recalibration warmup complete: {}", detail);
