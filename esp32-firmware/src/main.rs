@@ -4,7 +4,7 @@ use esp_idf_hal::gpio::PinDriver;
 use esp_idf_hal::i2c::{self, I2cDriver};
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::units::Hertz;
-use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::sys as esp_idf_sys;
 use log::info;
 
@@ -30,6 +30,34 @@ const MQTT_COMMAND_TOPIC: &str = "sensors/esp32/command";
 const DEVICE_NAME: &str = "esp32-scd40";
 
 const DEFAULT_DEEP_SLEEP_SECONDS: u64 = 300;
+const NVS_NAMESPACE: &str = "storage";
+const NVS_SLEEP_KEY: &str = "sleep_sec";
+
+fn read_deep_sleep_from_nvs(nvs: &EspNvs<NvsDefault>) -> u64 {
+    match nvs.get_u64(NVS_SLEEP_KEY) {
+        Ok(Some(value)) => {
+            info!("✓ Read deep sleep time from NVS: {} seconds", value);
+            value
+        }
+        Ok(None) => {
+            info!(
+                "No deep sleep time in NVS, using default: {} seconds",
+                DEFAULT_DEEP_SLEEP_SECONDS
+            );
+            DEFAULT_DEEP_SLEEP_SECONDS
+        }
+        Err(e) => {
+            info!("⚠ Failed to read from NVS: {:?}, using default", e);
+            DEFAULT_DEEP_SLEEP_SECONDS
+        }
+    }
+}
+
+fn write_deep_sleep_to_nvs(nvs: &mut EspNvs<NvsDefault>, seconds: u64) -> Result<()> {
+    nvs.set_u64(NVS_SLEEP_KEY, seconds)?;
+    info!("✓ Saved deep sleep time to NVS: {} seconds", seconds);
+    Ok(())
+}
 
 fn blink_led(
     led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>,
@@ -82,11 +110,18 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> Result<()> {
             }
         }
     }
-    info!("Waiting for network interface to come up...");
+    info!("Waiting for netacaork interface to come up...");
     wifi.wait_netif_up()?;
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
     info!("✓ WiFi connected!");
     info!("  IP address: {:?}", ip_info.ip);
+
+    // Enable modem sleep to save power during WiFi operation
+    info!("Enabling WiFi modem sleep for power saving...");
+    unsafe {
+        esp_idf_sys::esp_wifi_set_ps(esp_idf_sys::wifi_ps_type_t_WIFI_PS_MIN_MODEM);
+    }
+
     Ok(())
 }
 
@@ -125,8 +160,6 @@ fn perform_measurement(
     scd40: &mut Scd4x<I2cDriver<'_>, Ets>,
     led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>,
 ) -> Result<DevicePayload> {
-    info!("FRC flag is set. Performing normal measurement.");
-
     let mut failure_reason: u8 = 0;
     start_periodic_measurement(scd40)?;
 
@@ -289,7 +322,6 @@ fn perform_get_temp_offset(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<Devi
 }
 
 fn main() -> Result<()> {
-    let mut deep_sleep_seconds = DEFAULT_DEEP_SLEEP_SECONDS;
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
@@ -304,7 +336,7 @@ fn main() -> Result<()> {
     blink_led(&mut led, 1);
 
     // Setup I2C
-    let i2c_config = i2c::config::Config::new().baudrate(Hertz(10_000));
+    let i2c_config = i2c::config::Config::new().baudrate(Hertz(100_000));
     info!("Initializing I2C on GPIO21 (SDA) and GPIO22 (SCL)...");
     let i2c_driver = I2cDriver::new(
         peripherals.i2c0,
@@ -320,12 +352,19 @@ fn main() -> Result<()> {
     info!("Waiting 1.1 seconds for sensor to enter idle state...");
     FreeRtos::delay_ms(1100);
 
+    // NVS initialization
+    info!("Initializing NVS...");
+    let nvs_default = EspDefaultNvsPartition::take()?;
+    let mut nvs = EspNvs::new(nvs_default.clone(), NVS_NAMESPACE, true)?;
+
+    // Read deep sleep time from NVS or use default
+    let mut deep_sleep_seconds = read_deep_sleep_from_nvs(&nvs);
+
     // Network initialization
     info!("Initializing WiFi...");
     let sys_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
     let mut wifi = BlockingWifi::wrap(
-        EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
+        EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs_default))?,
         sys_loop,
     )?;
 
@@ -446,7 +485,13 @@ fn main() -> Result<()> {
         DeviceCommand::GetTempOffset => perform_get_temp_offset(&mut scd40)?,
         DeviceCommand::SetDeepSleepTime { seconds } => {
             deep_sleep_seconds = seconds;
-            DevicePayload::SetDeepSleepTimeSuccess { seconds }
+            match write_deep_sleep_to_nvs(&mut nvs, seconds) {
+                Ok(_) => DevicePayload::SetDeepSleepTimeSuccess { seconds },
+                Err(e) => {
+                    info!("⚠ Failed to save deep sleep time to NVS: {:?}", e);
+                    DevicePayload::SetDeepSleepTimeSuccess { seconds } // Still apply it for this cycle
+                }
+            }
         }
         DeviceCommand::GetDeepSleepTime => DevicePayload::GetDeepSleepTimeSuccess {
             seconds: deep_sleep_seconds,
@@ -461,8 +506,30 @@ fn main() -> Result<()> {
     info!("║  Cycle Complete!                                 ║");
     info!("╚════════════════════════════════════════════════════╝");
 
+    // Power down peripherals before deep sleep
+    info!("Shutting down peripherals...");
+
+    // Turn off LED
+    let _ = led.set_low();
+
+    // Stop SCD40 periodic measurement to save power
+    let _ = scd40.stop_periodic_measurement();
+    FreeRtos::delay_ms(500);
+
+    // Disconnect MQTT
+    drop(mqtt_client);
+
+    // Disconnect and stop WiFi
+    info!("Disconnecting WiFi...");
+    let _ = wifi.disconnect();
+    FreeRtos::delay_ms(100);
+    let _ = wifi.stop();
+    FreeRtos::delay_ms(100);
+
+    info!("All peripherals powered down.");
+
     // Enter deep sleep
-    let sleep_duration_us: u64 = deep_sleep_seconds * 1000 * 1000; // 10 seconds for debugging purposes
+    let sleep_duration_us: u64 = deep_sleep_seconds * 1000 * 1000;
     info!(
         "Entering deep sleep for {} seconds...\n",
         deep_sleep_seconds
