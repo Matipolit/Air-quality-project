@@ -69,11 +69,7 @@ async fn main() {
 
     info!("Connecting to MQTT broker at {}:{}", &mqtt_host, mqtt_port);
     let (client, mut connection) = Client::new(mqttoptions, 10);
-    info!("Subscribing to mqtt topic {}", mqtt_topic);
-    client
-        .subscribe(&mqtt_topic, rumqttc::QoS::AtLeastOnce)
-        .expect("Could not connect to the MQTT topic.");
-    info!("✓ Connected and subscribed! Waiting for messages...\n");
+    info!("Waiting for connection...\n");
 
     loop {
         match connection.eventloop.poll().await {
@@ -194,10 +190,10 @@ async fn main() {
 
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 info!("✓ Connected to MQTT broker");
-                info!("Re-subscribing to mqtt topic {}", mqtt_topic);
+                info!("Subscribing to mqtt topic {}", mqtt_topic);
                 client
                     .subscribe(&mqtt_topic, rumqttc::QoS::AtLeastOnce)
-                    .expect("Could not re-subscribe to the MQTT topic.");
+                    .expect("Could not subscribe to the MQTT topic.");
             }
             Ok(Event::Incoming(Packet::SubAck(_))) => info!("✓ Subscription confirmed"),
             Err(e) => {
