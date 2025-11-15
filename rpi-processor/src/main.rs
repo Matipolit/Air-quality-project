@@ -1,9 +1,19 @@
-use std::{env, time::Duration};
+mod anomalies;
 
+use circular_queue::CircularQueue;
 use rumqttc::{Client, Event, MqttOptions, Packet};
 use shared_types::{DeviceMessage, DevicePayload};
+use std::time::SystemTime;
+use std::{env, time::Duration};
 
 use log::{self, debug, error, info};
+
+pub struct MeasurementWithTime {
+    co2: u16,
+    temperature: u32,
+    humidity: f32,
+    time: SystemTime,
+}
 
 pub async fn save_measurement_to_influx(device: &str, co2: u16, temperature: u32, humidity: f32) {
     let host = env::var("INFLUXDB_URL").expect("INFLUXDB_URL must be set");
@@ -41,6 +51,9 @@ async fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
+    let mut measurement_queue: CircularQueue<MeasurementWithTime> =
+        CircularQueue::with_capacity(10);
+
     let mqtt_host = env::var("MQTT_BROKER_HOST").unwrap_or_else(|_| "localhost".to_string());
     let mqtt_port: u16 = env::var("MQTT_BROKER_PORT")
         .unwrap_or_else(|_| "1883".to_string())
@@ -58,7 +71,7 @@ async fn main() {
     let (client, mut connection) = Client::new(mqttoptions, 10);
     info!("Subscribing to mqtt topic {}", mqtt_topic);
     client
-        .subscribe(mqtt_topic, rumqttc::QoS::AtLeastOnce)
+        .subscribe(&mqtt_topic, rumqttc::QoS::AtLeastOnce)
         .expect("Could not connect to the MQTT topic.");
     info!("✓ Connected and subscribed! Waiting for messages...\n");
 
@@ -83,10 +96,17 @@ async fn main() {
                                         temperature,
                                         humidity,
                                     } => {
+                                        let now = SystemTime::now();
                                         info!("Received measurement success");
                                         info!("CO2: {}", co2);
                                         info!("Temperature: {}", temperature);
                                         info!("Humidity: {}", humidity);
+                                        measurement_queue.push(MeasurementWithTime {
+                                            co2,
+                                            temperature,
+                                            humidity,
+                                            time: now,
+                                        });
                                         save_measurement_to_influx(
                                             device,
                                             co2,
@@ -172,7 +192,13 @@ async fn main() {
                 }
             }
 
-            Ok(Event::Incoming(Packet::ConnAck(_))) => info!("✓ Connected to MQTT broker"),
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                info!("✓ Connected to MQTT broker");
+                info!("Re-subscribing to mqtt topic {}", mqtt_topic);
+                client
+                    .subscribe(&mqtt_topic, rumqttc::QoS::AtLeastOnce)
+                    .expect("Could not re-subscribe to the MQTT topic.");
+            }
             Ok(Event::Incoming(Packet::SubAck(_))) => info!("✓ Subscription confirmed"),
             Err(e) => {
                 error!("❌ Connection error: {:?}", e);
