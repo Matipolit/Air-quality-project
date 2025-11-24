@@ -7,6 +7,7 @@ The sensor is occasionally exposed to direct sunlight, which causes anomalous da
 - **Humidity**: Significant drops (5-20% below normal)
 - **Duration**: Multi-hour events (2-6 hours typically)
 - **Challenge**: Distinguishing from normal daily temperature variations
+- **Data flow**: Irregular (typically ~5 minutes, but gaps possible due to battery replacement)
 
 ## Characteristics of Sunlight Spikes
 
@@ -35,12 +36,13 @@ Based on Grafana analysis:
 
 **Algorithm**:
 ```
-1. Use sliding window (30-60 minutes)
-2. Calculate temperature slope (°C/hour)
-3. Calculate humidity slope (%RH/hour)
-4. Calculate Pearson correlation coefficient
-5. If slopes have opposite signs AND correlation < -0.6 → flag as suspicious
-6. Check magnitude to confirm
+1. Use sliding time-based window (30-60 minutes) - not fixed count!
+2. Filter out measurements with large time gaps (>15 min from previous)
+3. Calculate temperature slope (°C/hour) using timestamp differences
+4. Calculate humidity slope (%RH/hour) using timestamp differences
+5. Calculate Pearson correlation coefficient
+6. If slopes have opposite signs AND correlation < -0.6 → flag as suspicious
+7. Check magnitude to confirm
 ```
 
 **Pros**:
@@ -49,8 +51,9 @@ Based on Grafana analysis:
 - Low false positive rate
 
 **Cons**:
-- Requires enough data points in window
+- Requires enough data points in window (minimum 6-8 measurements)
 - May miss very slow-onset events
+- Sensitive to data gaps - need gap handling
 
 ---
 
@@ -88,8 +91,11 @@ Based on Grafana analysis:
 **Algorithm**:
 ```
 Phase 1: Detect rapid onset
-- rate_temp = (current_temp - temp_30min_ago) / 0.5 hours
-- rate_humidity = (current_humidity - humidity_30min_ago) / 0.5 hours
+- Find measurement ~30min ago (use actual timestamp, not index!)
+- Check if time gap < 45 min (otherwise skip - data too sparse)
+- actual_time_diff = current_time - old_time (in hours)
+- rate_temp = (current_temp - old_temp) / actual_time_diff
+- rate_humidity = (current_humidity - old_humidity) / actual_time_diff
 - IF rate_temp > 2°C/hour AND rate_humidity < -3%/hour → flag onset
 
 Phase 2: Check magnitude
@@ -116,6 +122,7 @@ Phase 4: Verify anti-correlation
 **Cons**:
 - May have false positives during HVAC events
 - Threshold tuning required
+- Requires careful handling of time gaps to avoid incorrect rate calculations
 
 ---
 
@@ -250,6 +257,38 @@ fn detect_sunlight_spike(
     
     SunlightDetectionResult::no_sunlight("Conditions not met")
 }
+
+// Helper: Get measurements within time window, handling gaps
+fn get_time_window_data(
+    history: &CircularQueue<MeasurementWithTime>,
+    window_duration: Duration,
+    max_gap_duration: Duration,  // e.g., 15 minutes
+) -> Option<Vec<MeasurementWithTime>> {
+    
+    let now = SystemTime::now();
+    let window_start = now - window_duration;
+    
+    // Collect measurements within window
+    let window_data: Vec<_> = history
+        .iter()
+        .filter(|m| m.time >= window_start)
+        .collect();
+    
+    // Check for large gaps that would invalidate the window
+    for i in 1..window_data.len() {
+        let gap = window_data[i].time.duration_since(window_data[i-1].time);
+        if gap > max_gap_duration {
+            return None;  // Gap too large, window invalid
+        }
+    }
+    
+    // Need minimum number of measurements
+    if window_data.len() < 8 {
+        return None;
+    }
+    
+    Some(window_data)
+}
 ```
 
 ### Key Tunable Parameters
@@ -257,6 +296,8 @@ fn detect_sunlight_spike(
 | Parameter | Initial Value | Range | Notes |
 |-----------|---------------|-------|-------|
 | `window_size_hours` | 2.0 | 1.0-3.0 | Smaller = faster detection, larger = more robust |
+| `max_gap_minutes` | 15 | 10-20 | Max time gap between measurements in window |
+| `min_measurements_in_window` | 8 | 6-12 | Minimum data points needed (accounts for ~5min intervals) |
 | `temp_deviation_threshold` | 3.0°C | 2.0-5.0°C | Depends on typical indoor variance |
 | `humidity_deviation_threshold` | -5.0% | -3.0 to -10.0% | Adjust based on sensor sensitivity |
 | `correlation_threshold` | -0.6 | -0.5 to -0.8 | Stricter = fewer false positives |
@@ -267,10 +308,11 @@ fn detect_sunlight_spike(
 ## Implementation Strategy
 
 ### Phase 1: Basic Detection (Week 1)
-1. Implement Approach 3 (Rate of Change + Magnitude)
-2. Add time-of-day filtering
-3. Flag measurements with `possible_sunlight: bool`
-4. Log detections for manual review
+1. Implement time-based windowing with gap detection
+2. Implement Approach 3 (Rate of Change + Magnitude)
+3. Add time-of-day filtering
+4. Flag measurements with `possible_sunlight: bool`
+5. Log detections AND data gaps for manual review
 
 ### Phase 2: Correlation Enhancement (Week 2)
 1. Add correlation calculation
@@ -299,6 +341,7 @@ pub struct MeasurementWithTime {
     temperature: f32,  // Consider using f32 instead of u32 for precision
     humidity: f32,
     time: SystemTime,
+    time_since_last: Option<Duration>,  // Track gaps
     sunlight_score: Option<f32>,  // 0.0-1.0 confidence
 }
 ```
@@ -312,6 +355,8 @@ pub struct SunlightDetectionResult {
     humidity_deviation: f32,
     correlation: f32,
     reason: String,
+    measurements_in_window: usize,  // For debugging
+    largest_gap_seconds: u64,  // For debugging
 }
 ```
 
@@ -327,9 +372,37 @@ Track these metrics to evaluate algorithm performance:
 ## Testing Approach
 
 1. **Unit tests**: Test individual components (correlation, slope, etc.)
-2. **Integration tests**: Test full pipeline with synthetic data
-3. **Historical replay**: Run algorithm on past data with known labels
-4. **Live monitoring**: Deploy with logging, manually verify for 1-2 weeks
+2. **Gap handling tests**: Test with synthetic data containing gaps (10min, 30min, 2hr)
+3. **Integration tests**: Test full pipeline with synthetic data
+4. **Historical replay**: Run algorithm on past data with known labels
+5. **Live monitoring**: Deploy with logging, manually verify for 1-2 weeks
+
+## Handling Data Gaps
+
+### Gap Detection Strategy
+
+**Small gaps (<15 minutes)**: 
+- Include in window analysis
+- Use actual timestamps for rate calculations
+- Should not affect detection significantly
+
+**Medium gaps (15-60 minutes)**:
+- Invalidate current detection window
+- Reset spike tracking
+- Wait for new continuous data stream
+
+**Large gaps (>60 minutes)**:
+- Clear all baseline calculations
+- Treat as system restart
+- Require new warmup period
+
+### Implementation Notes
+
+1. **Always use timestamps, never array indices** for rate calculations
+2. **Calculate actual time differences** between measurements
+3. **Track largest gap in each window** for debugging
+4. **Log gap events** to understand battery replacement patterns
+5. **Consider exponential moving averages** instead of simple moving averages (more robust to gaps)
 
 ## Future Enhancements
 
@@ -338,6 +411,8 @@ Track these metrics to evaluate algorithm performance:
 - **Multi-sensor fusion**: If you add multiple sensors, combine signals
 - **Spike prediction**: Use weather API to predict sunny periods
 - **Auto-correction**: Automatically filter or adjust spike data before storage
+- **Gap interpolation**: Intelligently fill small gaps using interpolation
+- **Battery monitoring**: Predict when battery replacement is needed to minimize gaps
 
 ## References
 
