@@ -204,7 +204,7 @@ fn perform_measurement(
     let final_mqtt_message = if let Some(sensor_data) = data {
         DevicePayload::MeasurementSuccess {
             co2: sensor_data.co2,
-            temperature: sensor_data.temperature as u32,
+            temperature: sensor_data.temperature,
             humidity: sensor_data.humidity,
         }
     } else {
@@ -503,7 +503,7 @@ fn main() -> Result<()> {
     FreeRtos::delay_ms(2000); // Time to send
 
     info!("╔════════════════════════════════════════════════════╗");
-    info!("║  Cycle Complete!                                 ║");
+    info!("║  Cycle Complete!                                   ║");
     info!("╚════════════════════════════════════════════════════╝");
 
     // Power down peripherals before deep sleep

@@ -39,7 +39,7 @@ pub enum DevicePayload {
     #[serde(rename = "success")]
     MeasurementSuccess {
         co2: u16,
-        temperature: u32,
+        temperature: f32,
         humidity: f32,
     },
 
@@ -140,7 +140,7 @@ impl DeviceCommand {
 // ============================================================================
 
 impl DevicePayload {
-    pub fn measurement(co2: u16, temperature: u32, humidity: f32) -> Self {
+    pub fn measurement(co2: u16, temperature: f32, humidity: f32) -> Self {
         Self::MeasurementSuccess {
             co2,
             temperature,
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_measurement_serialization() {
-        let msg = DeviceMessage::new("esp32-test", DevicePayload::measurement(450, 22, 45.3));
+        let msg = DeviceMessage::new("esp32-test", DevicePayload::measurement(450, 22.0, 45.3));
 
         let json = msg.to_json().unwrap();
         assert!(json.contains("\"status\":\"success\""));

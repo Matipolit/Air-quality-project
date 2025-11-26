@@ -46,7 +46,7 @@ impl InfluxMeasurementRow {
         };
         Ok(MeasurementWithTime {
             co2: self.co2_ppm as u16,
-            temperature: self.temperature_c as u32,
+            temperature: self.temperature_c as f32,
             humidity: self.humidity_percent as f32,
             time: DateTime::parse_from_rfc3339(&time_with_timezone)?.with_timezone(&Utc),
             device: self.device.clone(),
@@ -327,7 +327,7 @@ pub async fn delete_old_markings(
 #[derive(Debug, Clone)]
 pub struct MeasurementWithTime {
     co2: u16,
-    temperature: u32,
+    temperature: f32,
     humidity: f32,
     time: DateTime<Utc>,
     device: String,
@@ -339,7 +339,7 @@ pub async fn save_measurement_to_influx(
     influx_database: &str,
     device: &str,
     co2: u16,
-    temperature: u32,
+    temperature: f32,
     humidity: f32,
     reqwest_client: &reqwest::Client,
 ) {

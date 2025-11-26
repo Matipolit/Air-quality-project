@@ -862,6 +862,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "esp32-firmware-new"
+version = "0.1.0"
+dependencies = [
+ "embuild",
+ "esp-idf-svc",
+ "log",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2001,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "rpi-processor"
-version = "0.1.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",

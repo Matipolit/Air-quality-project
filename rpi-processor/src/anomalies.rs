@@ -66,7 +66,7 @@ impl Display for AnomalyFlags {
 const SUNLIGHT_DETECTION_SCOPE: u32 = 2;
 const TEMP_1H_ANOMALY_THRESHOLD: f32 = 6.0;
 const HUMIDITY_1H_ANOMALY_THRESHOLD: f32 = 20.0;
-const CO2_1H_ANOMALY_THRESHOLD: f32 = 40.0;
+const CO2_1H_ANOMALY_THRESHOLD: f32 = 100.0;
 
 fn get_values_from_time_window(
     data: impl Iterator<Item = MeasurementWithTime>,

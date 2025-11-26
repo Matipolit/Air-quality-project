@@ -1,10 +1,9 @@
-# air-quality-project/Cargo.toml
 [workspace]
 members = [
-    "shared-types",
     "esp32-firmware",
-    "rpi-processor",
+    "esp32-firmware-new",
     "rpi-commander",
+    "rpi-processor",
+    "shared-types",
 ]
-
 resolver = "3"
