@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "esp32-firmware",
-    "esp32-firmware-new",
     "rpi-commander",
     "rpi-processor",
     "shared-types",
