@@ -1,6 +1,7 @@
 mod anomalies;
 mod fetcher;
 mod predictor;
+mod predictor_web;
 mod types;
 
 use chrono::{DateTime, Utc};
@@ -43,6 +44,14 @@ struct Args {
     /// Run a matrix of anomaly detection tests with different parameters
     #[arg(long, default_value_t = false)]
     mark_anomalies_test: bool,
+
+    /// Run web server for predictor UI
+    #[arg(short = 'w', long, default_value_t = false)]
+    web_server: bool,
+
+    /// Port for web server
+    #[arg(long, default_value_t = 8080)]
+    web_port: u16,
 }
 
 pub async fn fetch_historical_measurements(
@@ -730,6 +739,21 @@ async fn main() {
         {
             Ok(()) => log::info!("Weather prediction complete"),
             Err(e) => log::error!("Failed to predict weather: {}", e),
+        }
+    }
+
+    if args.web_server {
+        log::info!("Starting predictor web server on port {}", args.web_port);
+        match predictor_web::run_web_server(
+            influx_host.clone(),
+            influx_token.clone(),
+            influx_database.clone(),
+            args.web_port,
+        )
+        .await
+        {
+            Ok(()) => log::info!("Web server stopped"),
+            Err(e) => log::error!("Web server failed: {}", e),
         }
     }
 
