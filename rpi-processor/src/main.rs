@@ -1,16 +1,19 @@
 mod anomalies;
+mod fetcher;
+mod predictor;
+mod types;
 
 use chrono::{DateTime, Utc};
 use circular_queue::CircularQueue;
 use rumqttc::{Client, Event, MqttOptions, Packet};
 use shared_types::{DeviceMessage, DevicePayload};
 use std::collections::VecDeque;
-use std::time::SystemTime;
 use std::{env, time::Duration};
 
 use log::{self, debug, error, info};
 
 use clap::Parser;
+use types::{InfluxMeasurementRow, MeasurementWithTime};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -26,40 +29,28 @@ struct Args {
     /// Receive live data from MQTT broker and save it to influxDB
     #[arg(short, long, default_value_t = false)]
     receive_live_data: bool,
+
+    /// Predict weather (CO2, Temp, Humidity) based on historical data
+    #[arg(short, long, default_value_t = false)]
+    predict_weather: bool,
+
+    /// Timestamp to use as "now" for prediction (RFC3339 format).
+    /// If provided, the model will be trained on data before this time,
+    /// and predict the weather 1 hour after this time, comparing it with actual data.
+    #[arg(long)]
+    prediction_timestamp: Option<String>,
+
+    /// Run a matrix of anomaly detection tests with different parameters
+    #[arg(long, default_value_t = false)]
+    mark_anomalies_test: bool,
 }
 
-#[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
-struct InfluxMeasurementRow {
-    time: String, // InfluxDB returns RFC3339 string
-    co2_ppm: f64,
-    temperature_c: f64,
-    humidity_percent: f64,
-    device: String,
-}
-
-impl InfluxMeasurementRow {
-    fn to_measurement_with_time(&self) -> Result<MeasurementWithTime, Box<dyn std::error::Error>> {
-        let time_with_timezone = if self.time.ends_with('Z') {
-            self.time.clone()
-        } else {
-            format!("{}Z", self.time)
-        };
-        Ok(MeasurementWithTime {
-            co2: self.co2_ppm as u16,
-            temperature: self.temperature_c as f32,
-            humidity: self.humidity_percent as f32,
-            time: DateTime::parse_from_rfc3339(&time_with_timezone)?.with_timezone(&Utc),
-            device: self.device.clone(),
-        })
-    }
-}
-
-pub async fn mark_historical_data(
+pub async fn fetch_historical_measurements(
     influx_host: &str,
     influx_token: &str,
     influx_database: &str,
     reqwest_client: &reqwest::Client,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<MeasurementWithTime>, Box<dyn std::error::Error>> {
     let query_url = format!("{}/api/v3/query_sql?db={}", influx_host, influx_database);
     log::debug!("Query URL: {}", query_url);
     // SQL query to get all measurements ordered by time
@@ -74,8 +65,6 @@ pub async fn mark_historical_data(
         ORDER BY time ASC
     "#;
 
-    // Make the request
-    // Make the request
     let response = reqwest_client
         .post(&query_url)
         .bearer_auth(influx_token)
@@ -87,7 +76,6 @@ pub async fn mark_historical_data(
         .send()
         .await?;
 
-    // Check response status first
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await?;
@@ -98,39 +86,12 @@ pub async fn mark_historical_data(
         .into());
     }
 
-    // Parse the response
     let response_text = response.text().await?;
-    log::info!("Received response of {} bytes", response_text.len());
-    log::debug!(
-        "First 500 chars: {}",
-        &response_text.chars().take(500).collect::<String>()
-    );
-    log::debug!(
-        "Last 200 chars: {}",
-        &response_text.chars().rev().take(200).collect::<String>()
-    );
-
-    // Check if response is empty
     if response_text.is_empty() {
-        log::warn!("Received empty response from InfluxDB");
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    // Check if response is valid JSON
-    if !response_text.starts_with('[') || !response_text.ends_with(']') {
-        log::error!("Received invalid JSON response from InfluxDB");
-        return Err("Invalid JSON response".into());
-    }
-
-    log::info!("Parsing JSON response");
     let influx_rows: Vec<InfluxMeasurementRow> = serde_json::from_str(&response_text)?;
-    log::info!("Parsed {} rows", influx_rows.len());
-
-    // With this:
-    log::info!(
-        "Converting {} rows to MeasurementWithTime...",
-        influx_rows.len()
-    );
     let mut measurements = Vec::with_capacity(influx_rows.len());
 
     for (idx, row) in influx_rows.iter().enumerate() {
@@ -142,21 +103,140 @@ pub async fn mark_historical_data(
                     idx,
                     e
                 );
-                log::error!("Problematic row: {:?}", row);
                 return Err(format!("Row {} conversion failed: {}", idx, e).into());
             }
         }
+    }
+    Ok(measurements)
+}
 
-        // Progress indicator for large datasets
-        if idx > 0 && idx % 1000 == 0 {
-            log::debug!("Converted {} / {} rows...", idx, influx_rows.len());
+pub async fn run_anomaly_test_matrix(
+    influx_host: &str,
+    influx_token: &str,
+    influx_database: &str,
+    reqwest_client: &reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("Starting anomaly test matrix...");
+    let measurements =
+        fetch_historical_measurements(influx_host, influx_token, influx_database, reqwest_client)
+            .await?;
+    log::info!("Fetched {} measurements for testing", measurements.len());
+
+    let window_sizes = [10, 15, 20, 30, 45, 60];
+    let z_scores_temp = [2.5, 3.0, 3.5, 4.0];
+    let z_scores_humidity = [3.0, 4.0];
+
+    let min_diffs_temp = [2.0, 3.0];
+    let min_diffs_humidity = [6.0, 7.0];
+    let min_diffs_co2 = [50.0, 70.0];
+    // Fixed CO2 for now
+    let z_score_co2 = 6.0;
+
+    let total_tests = window_sizes.len() * z_scores_temp.len() * z_scores_humidity.len();
+    let mut current_test = 0;
+
+    for &ws in &window_sizes {
+        for &zt in &z_scores_temp {
+            for &zh in &z_scores_humidity {
+                for &min_temp_diff in &min_diffs_temp {
+                    for &min_humidity_diff in &min_diffs_humidity {
+                        for &min_co2_diff in &min_diffs_co2 {
+                            current_test += 1;
+                            let config = anomalies::AnomalyConfig {
+                                window_size: ws,
+                                z_score_temp: zt,
+                                z_score_humidity: zh,
+                                z_score_co2: z_score_co2,
+                                min_temp_diff,
+                                min_humidity_diff,
+                                min_co2_diff,
+                            };
+
+                            let measurement_name = format!(
+                                "anomalies_w{}_t{}_h{}_mt{}_mh{}_mc{}",
+                                ws,
+                                zt,
+                                zh,
+                                min_temp_diff as u32,
+                                min_humidity_diff as u32,
+                                min_co2_diff as u32
+                            );
+                            log::info!(
+                                "Running test {}/{}: {}",
+                                current_test,
+                                total_tests,
+                                measurement_name
+                            );
+
+                            let mut window: VecDeque<MeasurementWithTime> =
+                                VecDeque::with_capacity(ws);
+                            let mut anomaly_batch = Vec::new();
+                            let batch_size = 500;
+
+                            for m in &measurements {
+                                window.push_back(m.clone());
+                                if window.len() > ws {
+                                    window.pop_front();
+                                }
+
+                                let anomalies =
+                                    anomalies::analyse_measurements_window(&window, &config, false);
+
+                                if anomalies.is_any_true() {
+                                    anomaly_batch.push((m.time, anomalies, m.device.clone()));
+
+                                    if anomaly_batch.len() >= batch_size {
+                                        save_anomalies_batch(
+                                            influx_host,
+                                            influx_token,
+                                            influx_database,
+                                            reqwest_client,
+                                            &anomaly_batch,
+                                            &measurement_name,
+                                        )
+                                        .await?;
+                                        anomaly_batch.clear();
+                                    }
+                                }
+                            }
+
+                            if !anomaly_batch.is_empty() {
+                                save_anomalies_batch(
+                                    influx_host,
+                                    influx_token,
+                                    influx_database,
+                                    reqwest_client,
+                                    &anomaly_batch,
+                                    &measurement_name,
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+
+    log::info!("Anomaly test matrix complete!");
+    Ok(())
+}
+
+pub async fn mark_historical_data(
+    influx_host: &str,
+    influx_token: &str,
+    influx_database: &str,
+    reqwest_client: &reqwest::Client,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let measurements =
+        fetch_historical_measurements(influx_host, influx_token, influx_database, reqwest_client)
+            .await?;
 
     log::info!("Received {} measurements", measurements.len());
 
     // Sliding window anomaly detection
-    let window_size = 300;
+    let config = anomalies::AnomalyConfig::default();
+    let window_size = config.window_size;
     let batch_size = 100; // Write anomalies in batches
     let mut window: VecDeque<MeasurementWithTime> = VecDeque::with_capacity(window_size);
     let mut anomaly_batch = Vec::new();
@@ -170,9 +250,9 @@ pub async fn mark_historical_data(
 
         let anomalies = if idx > 0 && idx % 1000 == 0 {
             log::debug!("Analysed {} / {} rows...", idx, measurements.len());
-            anomalies::analyse_measurements_window(window.clone(), true)
+            anomalies::analyse_measurements_window(&window, &config, true)
         } else {
-            anomalies::analyse_measurements_window(window.clone(), false)
+            anomalies::analyse_measurements_window(&window, &config, false)
         };
 
         if anomalies.is_any_true() {
@@ -191,6 +271,7 @@ pub async fn mark_historical_data(
                     influx_database,
                     reqwest_client,
                     &anomaly_batch,
+                    "anomalies",
                 )
                 .await?;
                 log::info!(
@@ -210,6 +291,7 @@ pub async fn mark_historical_data(
             influx_database,
             reqwest_client,
             &anomaly_batch,
+            "anomalies",
         )
         .await?;
         log::info!(
@@ -231,6 +313,7 @@ async fn save_anomalies_batch(
     influx_database: &str,
     reqwest_client: &reqwest::Client,
     anomalies: &[(DateTime<Utc>, anomalies::AnomalyFlags, String)],
+    measurement_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if anomalies.is_empty() {
         return Ok(());
@@ -245,7 +328,8 @@ async fn save_anomalies_batch(
 
         // Build line protocol: measurement,tags fields timestamp
         let line = format!(
-            "anomalies,device={} temperature_spike={},humidity_spike={},co2_spike={},physical_constraint_temp_violation={},physical_constraint_humidity_violation={},physical_constraint_co2_violation={},possible_sunlight={} {}",
+            "{},device={} temperature_spike={},humidity_spike={},co2_spike={},physical_constraint_temp_violation={},physical_constraint_humidity_violation={},physical_constraint_co2_violation={},possible_sunlight={} {}",
+            measurement_name,
             device,
             flags.temperature_spike,
             flags.humidity_spike,
@@ -294,10 +378,9 @@ pub async fn delete_old_markings(
 ) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Deleting old anomaly markings from database...");
 
+    // 1. List all tables to find ones starting with "anomalies"
     let query_url = format!("{}/api/v3/query_sql?db={}", influx_host, influx_database);
-
-    // SQL query to delete all records from the anomalies measurement
-    let sql_query = "DELETE FROM anomalies";
+    let sql_query = "SHOW TABLES";
 
     let response = reqwest_client
         .post(&query_url)
@@ -314,23 +397,64 @@ pub async fn delete_old_markings(
         let status = response.status();
         let error_text = response.text().await?;
         return Err(format!(
-            "InfluxDB delete failed with status {}: {}",
+            "InfluxDB show tables failed with status {}: {}",
             status, error_text
         )
         .into());
     }
 
-    log::info!("Successfully deleted all anomaly markings");
-    Ok(())
-}
+    let response_text = response.text().await?;
+    let tables: Vec<serde_json::Value> = serde_json::from_str(&response_text)?;
 
-#[derive(Debug, Clone)]
-pub struct MeasurementWithTime {
-    co2: u16,
-    temperature: f32,
-    humidity: f32,
-    time: DateTime<Utc>,
-    device: String,
+    let mut tables_to_delete = Vec::new();
+    for table in tables {
+        if let Some(name) = table.get("table_name").and_then(|v| v.as_str()) {
+            if name.starts_with("anomalies") {
+                tables_to_delete.push(name.to_string());
+            }
+        }
+    }
+
+    if tables_to_delete.is_empty() {
+        log::info!("No anomaly tables found to delete.");
+        return Ok(());
+    }
+
+    log::info!(
+        "Found {} tables to delete: {:?}",
+        tables_to_delete.len(),
+        tables_to_delete
+    );
+
+    for table_name in tables_to_delete {
+        let delete_url = format!(
+            "{}/api/v3/configure/table?db={}&table={}",
+            influx_host, influx_database, table_name
+        );
+
+        log::info!("Deleting table: {}", table_name);
+        let response = reqwest_client
+            .delete(&delete_url)
+            .bearer_auth(influx_token)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await?;
+            log::error!(
+                "Failed to delete table {}: {} - {}",
+                table_name,
+                status,
+                error_text
+            );
+        } else {
+            log::info!("Successfully deleted table: {}", table_name);
+        }
+    }
+
+    log::info!("Finished deleting old anomaly markings");
+    Ok(())
 }
 
 pub async fn save_measurement_to_influx(
@@ -563,6 +687,21 @@ async fn main() {
         }
     }
 
+    if args.mark_anomalies_test {
+        log::info!("Running anomaly test matrix");
+        match run_anomaly_test_matrix(
+            &influx_host,
+            &influx_token,
+            &influx_database,
+            &reqwest_client,
+        )
+        .await
+        {
+            Ok(()) => log::info!("Anomaly test matrix completed successfully"),
+            Err(e) => log::error!("Failed to run anomaly test matrix: {}", e),
+        }
+    }
+
     if args.delete_old_markings {
         log::info!("Deleting old anomaly markings");
         match delete_old_markings(
@@ -575,6 +714,22 @@ async fn main() {
         {
             Ok(()) => log::info!("Old anomaly markings deleted successfully"),
             Err(e) => log::error!("Failed to delete old markings: {}", e),
+        }
+    }
+
+    if args.predict_weather {
+        log::info!("Predicting weather");
+        match predictor::predict_weather(
+            &influx_host,
+            &influx_token,
+            &influx_database,
+            &reqwest_client,
+            args.prediction_timestamp,
+        )
+        .await
+        {
+            Ok(()) => log::info!("Weather prediction complete"),
+            Err(e) => log::error!("Failed to predict weather: {}", e),
         }
     }
 
