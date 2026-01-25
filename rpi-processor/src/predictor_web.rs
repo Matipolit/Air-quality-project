@@ -18,6 +18,7 @@ pub struct AppState {
     pub influx_token: String,
     pub influx_database: String,
     pub reqwest_client: reqwest::Client,
+    pub base_path: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,32 +75,71 @@ pub async fn run_web_server(
     influx_token: String,
     influx_database: String,
     port: u16,
+    base_path: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure base path starts with / and doesn't end with / (unless it is just "/")
+    let base_path = if !base_path.starts_with('/') {
+        format!("/{}", base_path)
+    } else {
+        base_path
+    };
+
+    let base_path = if base_path.len() > 1 && base_path.ends_with('/') {
+        base_path.trim_end_matches('/').to_string()
+    } else {
+        base_path
+    };
+
     let state = Arc::new(AppState {
         influx_host,
         influx_token,
         influx_database,
         reqwest_client: reqwest::Client::new(),
+        base_path: base_path.clone(),
     });
 
-    let app = Router::new()
+    let api_router = Router::new()
         .route("/", get(serve_index))
         .route("/api/available-timestamps", get(get_available_timestamps))
         .route("/api/predict", post(perform_prediction))
-        .layer(CorsLayer::permissive())
         .with_state(state);
 
+    let app = if base_path == "/" {
+        api_router.layer(CorsLayer::permissive())
+    } else {
+        Router::new()
+            .nest(&base_path, api_router)
+            .layer(CorsLayer::permissive())
+    };
+
     let addr = format!("0.0.0.0:{}", port);
-    log::info!("Starting predictor web server on http://{}", addr);
+
+    log::info!(
+        "Starting predictor web server on http://{}{}",
+        addr,
+        base_path
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
-
     Ok(())
 }
 
-async fn serve_index() -> impl IntoResponse {
-    Html(include_str!("predictor_web.html"))
+async fn serve_index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let html = include_str!("predictor_web.html");
+    // If base_path is "/", we want empty string for prefix to avoid "//api"
+    // But wait, if base_path is "/", appending it to "/api" gives "//api".
+    // Browsers handle "//api" as "protocol-relative URL" or just path?
+    // Usually path. "//api" -> "/api".
+    // But let's be clean.
+
+    let prefix = if state.base_path == "/" {
+        ""
+    } else {
+        &state.base_path
+    };
+
+    Html(html.replace("__API_BASE_PATH__", prefix))
 }
 
 async fn get_available_timestamps(
@@ -137,9 +177,15 @@ async fn get_available_timestamps(
         .await?;
 
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no text>".to_string());
+        log::error!("InfluxDB query failed: status={}, body={}", status, body);
         return Err(AppError::influx_error(format!(
-            "Query failed: {}",
-            response.status()
+            "Query failed: {} - {}",
+            status, body
         )));
     }
 
@@ -148,7 +194,13 @@ async fn get_available_timestamps(
         return Ok(Json(Vec::new()));
     }
 
-    let influx_rows: Vec<InfluxMeasurementRow> = serde_json::from_str(&response_text)?;
+    let influx_rows: Vec<InfluxMeasurementRow> = match serde_json::from_str(&response_text) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::error!("Failed to parse InfluxDB response: {}", e);
+            return Err(AppError::from(e));
+        }
+    };
 
     let timestamps: Vec<AvailableTimestamp> = influx_rows
         .into_iter()
@@ -585,6 +637,7 @@ struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        log::error!("Web handler error: {}", self.0);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("Error: {}", self.0),

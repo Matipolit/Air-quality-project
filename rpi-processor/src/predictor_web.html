@@ -303,7 +303,7 @@
             // Load available timestamps on page load
             async function loadTimestamps() {
                 try {
-                    const response = await fetch("/api/available-timestamps");
+                    const response = await fetch("__API_BASE_PATH__/api/available-timestamps");
                     if (!response.ok) {
                         throw new Error("Failed to load timestamps");
                     }
@@ -358,7 +358,7 @@
                 document.getElementById("predict-btn").disabled = true;
 
                 try {
-                    const response = await fetch("/api/predict", {
+                    const response = await fetch("__API_BASE_PATH__/api/predict", {
                         method: "POST",
                         headers: {
                             "Content-Type": "application/json",

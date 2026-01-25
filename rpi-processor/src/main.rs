@@ -52,6 +52,10 @@ struct Args {
     /// Port for web server
     #[arg(long, default_value_t = 8080)]
     web_port: u16,
+
+    /// Base path for web server (e.g. "/air-predictor")
+    #[arg(long, default_value = "/")]
+    web_base_path: String,
 }
 
 pub async fn fetch_historical_measurements(
@@ -749,6 +753,7 @@ async fn main() {
             influx_token.clone(),
             influx_database.clone(),
             args.web_port,
+            args.web_base_path,
         )
         .await
         {
