@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use circular_queue::CircularQueue;
 use rumqttc::{Client, Event, MqttOptions, Packet};
 use shared_types::{DeviceMessage, DevicePayload};
-use std::collections::VecDeque;
 use std::{env, time::Duration};
 
 use log::{self, debug, error, info};
@@ -129,102 +128,75 @@ pub async fn run_anomaly_test_matrix(
     influx_database: &str,
     reqwest_client: &reqwest::Client,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    log::info!("Starting anomaly test matrix...");
+    log::info!("Starting anomaly test matrix with new multi-stage detector...");
     let measurements =
         fetch_historical_measurements(influx_host, influx_token, influx_database, reqwest_client)
             .await?;
     log::info!("Fetched {} measurements for testing", measurements.len());
 
-    let window_sizes = [10, 15, 20, 30, 45, 60];
-    let z_scores_temp = [2.5, 3.0, 3.5, 4.0];
-    let z_scores_humidity = [3.0, 4.0];
+    // Test different configuration combinations
+    // Simple rule-based thresholds
+    let humidity_definite = [50.0, 55.0, 60.0];
+    let humidity_suspicious = [60.0, 65.0, 70.0];
+    let temp_above_daily_min = [6.0, 8.0, 10.0];
+    let temp_absolute_min = [10.0, 12.0, 14.0];
 
-    let min_diffs_temp = [2.0, 3.0];
-    let min_diffs_humidity = [6.0, 7.0];
-    let min_diffs_co2 = [50.0, 70.0];
-    // Fixed CO2 for now
-    let z_score_co2 = 6.0;
-
-    let total_tests = window_sizes.len() * z_scores_temp.len() * z_scores_humidity.len();
+    let total_tests =
+        humidity_definite.len() * humidity_suspicious.len() * temp_above_daily_min.len();
     let mut current_test = 0;
 
-    for &ws in &window_sizes {
-        for &zt in &z_scores_temp {
-            for &zh in &z_scores_humidity {
-                for &min_temp_diff in &min_diffs_temp {
-                    for &min_humidity_diff in &min_diffs_humidity {
-                        for &min_co2_diff in &min_diffs_co2 {
-                            current_test += 1;
-                            let config = anomalies::AnomalyConfig {
-                                window_size: ws,
-                                z_score_temp: zt,
-                                z_score_humidity: zh,
-                                z_score_co2: z_score_co2,
-                                min_temp_diff,
-                                min_humidity_diff,
-                                min_co2_diff,
-                            };
+    for &hum_def in &humidity_definite {
+        for &hum_sus in &humidity_suspicious {
+            for &temp_rise in &temp_above_daily_min {
+                for &temp_abs in &temp_absolute_min {
+                    current_test += 1;
 
-                            let measurement_name = format!(
-                                "anomalies_w{}_t{}_h{}_mt{}_mh{}_mc{}",
-                                ws,
-                                zt,
-                                zh,
-                                min_temp_diff as u32,
-                                min_humidity_diff as u32,
-                                min_co2_diff as u32
-                            );
-                            log::info!(
-                                "Running test {}/{}: {}",
-                                current_test,
-                                total_tests,
-                                measurement_name
-                            );
+                    let config = anomalies::AnomalyConfig {
+                        humidity_definite_anomaly: hum_def,
+                        humidity_suspicious: hum_sus,
+                        temp_above_daily_min: temp_rise,
+                        temp_absolute_min_for_spike: temp_abs,
+                        ..Default::default()
+                    };
 
-                            let mut window: VecDeque<MeasurementWithTime> =
-                                VecDeque::with_capacity(ws);
-                            let mut anomaly_batch = Vec::new();
-                            let batch_size = 500;
+                    let measurement_name = format!(
+                        "anomalies_v3_hd{}_hs{}_tr{}_ta{}",
+                        hum_def as u32, hum_sus as u32, temp_rise as u32, temp_abs as u32
+                    );
 
-                            for m in &measurements {
-                                window.push_back(m.clone());
-                                if window.len() > ws {
-                                    window.pop_front();
-                                }
+                    log::info!(
+                        "Running test {}/{}: {}",
+                        current_test,
+                        total_tests,
+                        measurement_name
+                    );
 
-                                let anomalies =
-                                    anomalies::analyse_measurements_window(&window, &config, false);
+                    // Run analysis with this config
+                    let result = anomalies::analyze_historical_data(&measurements, Some(config));
 
-                                if anomalies.is_any_true() {
-                                    anomaly_batch.push((m.time, anomalies, m.device.clone()));
+                    log::info!(
+                        "  -> {} anomalies ({} sunlight)",
+                        result.anomalies_detected,
+                        result.sunlight_events
+                    );
 
-                                    if anomaly_batch.len() >= batch_size {
-                                        save_anomalies_batch(
-                                            influx_host,
-                                            influx_token,
-                                            influx_database,
-                                            reqwest_client,
-                                            &anomaly_batch,
-                                            &measurement_name,
-                                        )
-                                        .await?;
-                                        anomaly_batch.clear();
-                                    }
-                                }
-                            }
+                    // Write results
+                    let anomaly_batch: Vec<_> = result
+                        .anomaly_timestamps
+                        .iter()
+                        .map(|(time, flags, device)| (*time, flags.clone(), device.clone()))
+                        .collect();
 
-                            if !anomaly_batch.is_empty() {
-                                save_anomalies_batch(
-                                    influx_host,
-                                    influx_token,
-                                    influx_database,
-                                    reqwest_client,
-                                    &anomaly_batch,
-                                    &measurement_name,
-                                )
-                                .await?;
-                            }
-                        }
+                    for chunk in anomaly_batch.chunks(500) {
+                        save_anomalies_batch(
+                            influx_host,
+                            influx_token,
+                            influx_database,
+                            reqwest_client,
+                            chunk,
+                            &measurement_name,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -247,75 +219,39 @@ pub async fn mark_historical_data(
 
     log::info!("Received {} measurements", measurements.len());
 
-    // Sliding window anomaly detection
-    let config = anomalies::AnomalyConfig::default();
-    let window_size = config.window_size;
-    let batch_size = 100; // Write anomalies in batches
-    let mut window: VecDeque<MeasurementWithTime> = VecDeque::with_capacity(window_size);
-    let mut anomaly_batch = Vec::new();
-    let mut total_anomalies = 0;
+    // Use new multi-stage anomaly detection
+    let result = anomalies::analyze_historical_data(&measurements, None);
 
-    for (idx, m) in measurements.iter().enumerate() {
-        window.push_back(m.clone());
-        if window.len() > window_size {
-            window.pop_front();
-        }
+    log::info!(
+        "Analysis complete: {} anomalies detected ({} sunlight events)",
+        result.anomalies_detected,
+        result.sunlight_events
+    );
 
-        let anomalies = if idx > 0 && idx % 1000 == 0 {
-            log::debug!("Analysed {} / {} rows...", idx, measurements.len());
-            anomalies::analyse_measurements_window(&window, &config, true)
-        } else {
-            anomalies::analyse_measurements_window(&window, &config, false)
-        };
+    // Write anomalies in batches
+    let batch_size = 100;
+    let anomaly_batch: Vec<_> = result
+        .anomaly_timestamps
+        .iter()
+        .map(|(time, flags, device)| (*time, flags.clone(), device.clone()))
+        .collect();
 
-        if anomalies.is_any_true() {
-            log::warn!("Anomalies detected in measurement from time: {:?}", m.time);
-            log::warn!("{}", anomalies);
-
-            // Add to batch
-            anomaly_batch.push((m.time, anomalies, m.device.clone()));
-            total_anomalies += 1;
-
-            // Write batch if it reaches batch_size
-            if anomaly_batch.len() >= batch_size {
-                save_anomalies_batch(
-                    influx_host,
-                    influx_token,
-                    influx_database,
-                    reqwest_client,
-                    &anomaly_batch,
-                    "anomalies",
-                )
-                .await?;
-                log::info!(
-                    "Wrote batch of {} anomalies to InfluxDB",
-                    anomaly_batch.len()
-                );
-                anomaly_batch.clear();
-            }
-        }
-    }
-
-    // Write remaining anomalies
-    if !anomaly_batch.is_empty() {
+    for chunk in anomaly_batch.chunks(batch_size) {
         save_anomalies_batch(
             influx_host,
             influx_token,
             influx_database,
             reqwest_client,
-            &anomaly_batch,
+            chunk,
             "anomalies",
         )
         .await?;
-        log::info!(
-            "Wrote final batch of {} anomalies to InfluxDB",
-            anomaly_batch.len()
-        );
+        log::info!("Wrote batch of {} anomalies to InfluxDB", chunk.len());
     }
 
     log::info!(
-        "✓ Anomaly detection complete: {} total anomalies found and saved",
-        total_anomalies
+        "Anomaly detection complete: {} total anomalies found and saved",
+        result.anomalies_detected
     );
     Ok(())
 }
@@ -644,26 +580,26 @@ pub async fn receive_live_data(
                                 }
                             }
                             Err(e) => {
-                                error!("❌ Failed to decode message payload: {:?}", e);
+                                error!("Failed to decode message payload: {:?}", e);
                             }
                         }
                     }
                     Err(e) => {
-                        error!("❌ Failed to decode message payload: {:?}", e);
+                        error!("Failed to decode message payload: {:?}", e);
                     }
                 }
             }
 
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                info!("✓ Connected to MQTT broker");
+                info!("Connected to MQTT broker");
                 info!("Subscribing to mqtt topic {}", mqtt_topic);
                 client
                     .subscribe(&mqtt_topic, rumqttc::QoS::AtLeastOnce)
                     .expect("Could not subscribe to the MQTT topic.");
             }
-            Ok(Event::Incoming(Packet::SubAck(_))) => info!("✓ Subscription confirmed"),
+            Ok(Event::Incoming(Packet::SubAck(_))) => info!("Subscription confirmed"),
             Err(e) => {
-                error!("❌ Connection error: {:?}", e);
+                error!("Connection error: {:?}", e);
                 error!("Retrying in 5 seconds...");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }

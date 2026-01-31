@@ -36,7 +36,7 @@ const NVS_SLEEP_KEY: &str = "sleep_sec";
 fn read_deep_sleep_from_nvs(nvs: &EspNvs<NvsDefault>) -> u64 {
     match nvs.get_u64(NVS_SLEEP_KEY) {
         Ok(Some(value)) => {
-            info!("✓ Read deep sleep time from NVS: {} seconds", value);
+            info!("Read deep sleep time from NVS: {} seconds", value);
             value
         }
         Ok(None) => {
@@ -47,7 +47,7 @@ fn read_deep_sleep_from_nvs(nvs: &EspNvs<NvsDefault>) -> u64 {
             DEFAULT_DEEP_SLEEP_SECONDS
         }
         Err(e) => {
-            info!("⚠ Failed to read from NVS: {:?}, using default", e);
+            info!("Failed to read from NVS: {:?}, using default", e);
             DEFAULT_DEEP_SLEEP_SECONDS
         }
     }
@@ -55,7 +55,7 @@ fn read_deep_sleep_from_nvs(nvs: &EspNvs<NvsDefault>) -> u64 {
 
 fn write_deep_sleep_to_nvs(nvs: &mut EspNvs<NvsDefault>, seconds: u64) -> Result<()> {
     nvs.set_u64(NVS_SLEEP_KEY, seconds)?;
-    info!("✓ Saved deep sleep time to NVS: {} seconds", seconds);
+    info!("Saved deep sleep time to NVS: {} seconds", seconds);
     Ok(())
 }
 
@@ -113,7 +113,7 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> Result<()> {
     info!("Waiting for netacaork interface to come up...");
     wifi.wait_netif_up()?;
     let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
-    info!("✓ WiFi connected!");
+    info!("WiFi connected");
     info!("  IP address: {:?}", ip_info.ip);
 
     // Enable modem sleep to save power during WiFi operation
@@ -128,8 +128,8 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> Result<()> {
 fn start_periodic_measurement(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<()> {
     info!("Starting periodic measurement...");
     match scd40.start_periodic_measurement() {
-        Ok(_) => info!("✓ Measurement started."),
-        Err(e) => bail!("✗ Failed to start measurement: {:?}", e),
+        Ok(_) => info!("Measurement started"),
+        Err(e) => bail!("Failed to start measurement: {:?}", e),
     }
     Ok(())
 }
@@ -137,8 +137,8 @@ fn start_periodic_measurement(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<(
 fn stop_periodic_measurement(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<()> {
     info!("Stopping periodic measurement...");
     match scd40.stop_periodic_measurement() {
-        Ok(_) => info!("✓ Measurement stopped."),
-        Err(e) => bail!("✗ Failed to stop measurement: {:?}", e),
+        Ok(_) => info!("Measurement stopped"),
+        Err(e) => bail!("Failed to stop measurement: {:?}", e),
     }
     info!("Waiting 600ms for stop command to complete...");
     FreeRtos::delay_ms(600);
@@ -176,23 +176,19 @@ fn perform_measurement(
 
     let data = if attempts >= MAX_ATTEMPTS {
         blink_led(led, 3);
-        info!("⚠ Timeout waiting for sensor data");
+        info!("Timeout waiting for sensor data");
         failure_reason = 1;
         None
     } else {
         info!("Reading measurement data...");
         match scd40.measurement() {
             Ok(data) => {
-                info!("╔════════ Sensor Reading ════════╗");
-                info!("║ CO2:         {} ppm", data.co2);
-                info!("║ Temperature: {:.2} °C", data.temperature);
-                info!("║ Humidity:    {:.2} %", data.humidity);
-                info!("╚════════════════════════════════╝");
+                info!("CO2: {} ppm, Temperature: {:.2} °C, Humidity: {:.2} %", data.co2, data.temperature, data.humidity);
                 Some(data)
             }
             Err(e) => {
                 blink_led(led, 2);
-                info!("✗ FAILED TO READ MEASUREMENT: {:?}", e);
+                info!("Failed to read measurement: {:?}", e);
                 failure_reason = 2;
                 None
             }
@@ -259,13 +255,13 @@ fn perform_frc(
 
     let final_payload = match frc_result {
         Ok(correction) => {
-            info!("✓ FRC successful! Correction: {} ppm", correction);
+            info!("FRC successful, correction: {} ppm", correction);
             blink_led(led, 5);
             DevicePayload::FrcSuccess { correction }
         }
         Err(e) => {
             let error = format!("{:?}", e);
-            info!("✗ FRC failed: {}", error);
+            info!("FRC failed: {}", error);
             blink_led(led, 10);
             DevicePayload::FrcError { detail: error }
         }
@@ -279,16 +275,16 @@ fn perform_set_temp_offset(
 ) -> Result<DevicePayload> {
     let final_device_payload = match scd40.set_temperature_offset(offset) {
         Ok(_) => {
-            info!("✓ Temperature offset set to {}. Persisting...", offset);
+            info!("Temperature offset set to {}. Persisting...", offset);
             // save to eeprom
             match scd40.persist_settings() {
                 Ok(_) => {
                     FreeRtos::delay_ms(800); // Poczekaj na zapis (wg datasheet 800ms)
-                    info!("✓ Temperature offset persisted to EEPROM.");
+                    info!("Temperature offset persisted to EEPROM");
                     DevicePayload::SetOffsetSuccess { offset }
                 }
                 Err(e) => {
-                    info!("✗ Failed to persist offset: {:?}", e);
+                    info!("Failed to persist offset: {:?}", e);
                     DevicePayload::SetOffsetError {
                         detail: format!("failed_to_persist: {:?}", e),
                     }
@@ -296,7 +292,7 @@ fn perform_set_temp_offset(
             }
         }
         Err(e) => {
-            info!("✗ Failed to set temperature offset: {:?}", e);
+            info!("Failed to set temperature offset: {:?}", e);
             DevicePayload::SetOffsetError {
                 detail: format!("failed_to_set: {:?}", e),
             }
@@ -308,11 +304,11 @@ fn perform_set_temp_offset(
 fn perform_get_temp_offset(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<DevicePayload> {
     let final_device_payload = match scd40.temperature_offset() {
         Ok(offset) => {
-            info!("✓ Current temperature offset: {}", offset);
+            info!("Current temperature offset: {}", offset);
             DevicePayload::GetOffsetSuccess { offset }
         }
         Err(e) => {
-            info!("✗ Failed to get temperature offset: {:?}", e);
+            info!("Failed to get temperature offset: {:?}", e);
             DevicePayload::GetOffsetError {
                 detail: format!("failed_to_get: {:?}", e),
             }
@@ -325,9 +321,7 @@ fn main() -> Result<()> {
     esp_idf_sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    info!("╔════════════════════════════════════════════════════╗");
-    info!("║  ESP32-S NodeMCU + SCD40 (Remote Control)        ║");
-    info!("╚════════════════════════════════════════════════════╝");
+    info!("ESP32-S NodeMCU + SCD40 starting...");
 
     let peripherals = Peripherals::take().unwrap();
     let mut led = PinDriver::output(peripherals.pins.gpio2)?;
@@ -377,12 +371,12 @@ fn main() -> Result<()> {
 
     match connect_wifi(&mut wifi) {
         Ok(_) => {
-            info!("✓ Connected to WiFi successfully!");
+            info!("Connected to WiFi");
             blink_led(&mut led, 2);
         }
         Err(err) => {
             blink_led(&mut led, 5);
-            bail!("✗ Failed to connect to WiFi: {:?}", err);
+            bail!("Failed to connect to WiFi: {:?}", err);
         }
     }
 
@@ -402,12 +396,12 @@ fn main() -> Result<()> {
         while let Ok(event) = mqtt_conn.next() {
             match event.payload() {
                 EventPayload::Connected(_) => {
-                    info!("✓ MQTT connected to broker");
+                    info!("MQTT connected to broker");
                     // signal we're connected
                     let _ = connected_tx.send(true);
                 }
                 EventPayload::Disconnected => {
-                    info!("✗ MQTT disconnected");
+                    info!("MQTT disconnected");
                 }
                 EventPayload::Received { data, topic, .. } => {
                     if topic == Some(MQTT_COMMAND_TOPIC) && !data.is_empty() {
@@ -417,11 +411,11 @@ fn main() -> Result<()> {
                                 info!("Parsed command: {:?}", command);
                                 // Wyślij komendę do głównego wątku
                                 if let Err(e) = cmd_tx.send(command) {
-                                    info!("✗ Failed to send command to main thread: {:?}", e);
+                                    info!("Failed to send command to main thread: {:?}", e);
                                 }
                             }
                             Err(e) => {
-                                info!("⚠ Failed to parse command JSON: {:?}", e);
+                                info!("Failed to parse command JSON: {:?}", e);
                             }
                         }
                     }
@@ -434,14 +428,14 @@ fn main() -> Result<()> {
     info!("Waiting for MQTT connection...");
     match connected_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(_) => {
-            info!("✓ MQTT connection established");
+            info!("MQTT connection established");
             // Now it's safe to subscribe
             info!("Subscribing to command topic: {}", MQTT_COMMAND_TOPIC);
             mqtt_client.subscribe(MQTT_COMMAND_TOPIC, QoS::AtLeastOnce)?;
-            info!("✓ Subscribed successfully");
+            info!("Subscribed successfully");
         }
         Err(_) => {
-            info!("⚠ Timeout waiting for MQTT connection, continuing anyway...");
+            info!("Timeout waiting for MQTT connection, continuing anyway...");
             // Try to subscribe anyway, it might work
             info!(
                 "Attempting to subscribe to command topic: {}",
@@ -457,7 +451,7 @@ fn main() -> Result<()> {
 
     let command = match received_cmd {
         Ok(cmd) => {
-            info!("✓ Received command: {:?}", cmd);
+            info!("Received command: {:?}", cmd);
             cmd
         }
         Err(_) => {
@@ -471,8 +465,8 @@ fn main() -> Result<()> {
     // always clear retained command before proceeding
     if !matches!(command, DeviceCommand::NoOp) {
         match clear_retained_command(&mut mqtt_client) {
-            Ok(_) => info!("✓ Retained command cleared."),
-            Err(e) => info!("⚠ Failed to clear retained command: {:?}", e),
+            Ok(_) => info!("Retained command cleared"),
+            Err(e) => info!("Failed to clear retained command: {:?}", e),
         }
     }
 
@@ -488,7 +482,7 @@ fn main() -> Result<()> {
             match write_deep_sleep_to_nvs(&mut nvs, seconds) {
                 Ok(_) => DevicePayload::SetDeepSleepTimeSuccess { seconds },
                 Err(e) => {
-                    info!("⚠ Failed to save deep sleep time to NVS: {:?}", e);
+                    info!("Failed to save deep sleep time to NVS: {:?}", e);
                     DevicePayload::SetDeepSleepTimeSuccess { seconds } // Still apply it for this cycle
                 }
             }
@@ -502,9 +496,7 @@ fn main() -> Result<()> {
 
     FreeRtos::delay_ms(2000); // Time to send
 
-    info!("╔════════════════════════════════════════════════════╗");
-    info!("║  Cycle Complete!                                   ║");
-    info!("╚════════════════════════════════════════════════════╝");
+    info!("Cycle complete");
 
     // Power down peripherals before deep sleep
     info!("Shutting down peripherals...");

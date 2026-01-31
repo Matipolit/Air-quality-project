@@ -1,9 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-// ============================================================================
-// Device to Server Messages (ESP32 → Raspberry Pi)
-// ============================================================================
-
 /// Main message envelope sent from ESP32 to server
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceMessage {
@@ -83,10 +79,6 @@ pub enum DevicePayload {
     Alive { uptime_seconds: u64 },
 }
 
-// ============================================================================
-// Server to Device Commands (Raspberry Pi → ESP32)
-// ============================================================================
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "cmd")]
 pub enum DeviceCommand {
@@ -135,10 +127,6 @@ impl DeviceCommand {
     }
 }
 
-// ============================================================================
-// Helper Constructors
-// ============================================================================
-
 impl DevicePayload {
     pub fn measurement(co2: u16, temperature: f32, humidity: f32) -> Self {
         Self::MeasurementSuccess {
@@ -162,10 +150,6 @@ impl DevicePayload {
         Self::FrcSuccess { correction }
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

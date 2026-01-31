@@ -23,7 +23,7 @@ impl Commander {
         let command_json = command.to_json()?;
 
         println!(
-            "📤 Sending to '{}' on topic '{}': {:?}",
+            "Sending to '{}' on topic '{}': {:?}",
             self.device, command_topic, command
         );
         debug!("Command JSON: {}", command_json);
@@ -35,13 +35,13 @@ impl Commander {
             command_json.as_bytes(),
         )?;
 
-        println!("✓ Command sent\n");
+        println!("Command sent\n");
         Ok(())
     }
 
     fn set_device(&mut self, device: String) {
         self.device = device;
-        println!("✓ Now targeting device: {}\n", self.device);
+        println!("Now targeting device: {}\n", self.device);
     }
 
     fn current_device(&self) -> &str {
@@ -83,31 +83,31 @@ async fn handle_mqtt_events(
 
                 match std::str::from_utf8(payload) {
                     Ok(str_message) => {
-                        debug!("📨 Received on '{}': {}", topic, str_message);
+                        debug!("Received on '{}': {}", topic, str_message);
 
                         match serde_json::from_str::<DeviceMessage>(str_message) {
                             Ok(device_message) => {
                                 display_device_message(&device_message);
                             }
                             Err(e) => {
-                                error!("❌ Failed to decode message: {:?}", e);
+                                error!("Failed to decode message: {:?}", e);
                             }
                         }
                     }
                     Err(e) => {
-                        error!("❌ Failed to decode UTF-8: {:?}", e);
+                        error!("Failed to decode UTF-8: {:?}", e);
                     }
                 }
             }
 
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                info!("✓ Connected to MQTT broker");
+                info!("Connected to MQTT broker");
             }
             Ok(Event::Incoming(Packet::SubAck(_))) => {
-                info!("✓ Subscription confirmed\n");
+                info!("Subscription confirmed\n");
             }
             Err(e) => {
-                error!("❌ Connection error: {:?}", e);
+                error!("Connection error: {:?}", e);
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             _ => {}
@@ -118,8 +118,7 @@ async fn handle_mqtt_events(
 fn display_device_message(msg: &DeviceMessage) {
     let device = &msg.device;
 
-    println!("\n┌─────────────────────────────────────");
-    println!("│ 📱 Device: {}", device);
+    println!("\n[Device: {}]", device);
 
     match &msg.payload {
         DevicePayload::MeasurementSuccess {
@@ -127,74 +126,61 @@ fn display_device_message(msg: &DeviceMessage) {
             temperature,
             humidity,
         } => {
-            println!("│ 📊 Status: Measurement Success");
-            println!("│ CO2: {} ppm", co2);
-            println!("│ Temperature: {}°C", temperature);
-            println!("│ Humidity: {:.1}%", humidity);
+            println!("  Measurement Success");
+            println!("  CO2: {} ppm", co2);
+            println!("  Temperature: {}°C", temperature);
+            println!("  Humidity: {:.1}%", humidity);
         }
         DevicePayload::Error { detail } => {
-            println!("│ ❌ Status: Error");
-            println!("│ Detail: {}", detail);
+            println!("  Error: {}", detail);
         }
         DevicePayload::FrcStart { target_ppm } => {
-            println!("│ 🔄 Status: FRC Started");
-            println!("│ Target: {} ppm", target_ppm);
+            println!("  FRC Started, target: {} ppm", target_ppm);
         }
         DevicePayload::FrcWarmupComplete { detail } => {
-            println!("│ ⏱️  Status: FRC Warmup Complete");
-            println!("│ Detail: {}", detail);
+            println!("  FRC Warmup Complete: {}", detail);
         }
         DevicePayload::FrcCalibrating { target_ppm } => {
-            println!("│ 🔧 Status: FRC Calibrating");
-            println!("│ Target: {} ppm", target_ppm);
+            println!("  FRC Calibrating, target: {} ppm", target_ppm);
         }
         DevicePayload::FrcSuccess { correction } => {
-            println!("│ ✅ Status: FRC Success");
-            println!("│ Correction: {} ppm", correction);
+            println!("  FRC Success, correction: {} ppm", correction);
         }
         DevicePayload::FrcError { detail } => {
-            println!("│ ❌ Status: FRC Error");
-            println!("│ Detail: {}", detail);
+            println!("  FRC Error: {}", detail);
         }
         DevicePayload::SetOffsetSuccess { offset } => {
-            println!("│ ✅ Status: Set Temperature Offset Success");
-            println!("│ Offset: {}°C", offset);
+            println!("  Set Temperature Offset Success: {}°C", offset);
         }
         DevicePayload::SetOffsetError { detail } => {
-            println!("│ ❌ Status: Set Temperature Offset Error");
-            println!("│ Detail: {}", detail);
+            println!("  Set Temperature Offset Error: {}", detail);
         }
         DevicePayload::GetOffsetSuccess { offset } => {
-            println!("│ ✅ Status: Get Temperature Offset Success");
-            println!("│ Offset: {}°C", offset);
+            println!("  Get Temperature Offset: {}°C", offset);
         }
         DevicePayload::GetOffsetError { detail } => {
-            println!("│ ❌ Status: Get Temperature Offset Error");
-            println!("│ Detail: {}", detail);
+            println!("  Get Temperature Offset Error: {}", detail);
         }
         DevicePayload::Alive { uptime_seconds } => {
             let uptime_mins = uptime_seconds / 60;
             let uptime_hours = uptime_mins / 60;
-            println!("│ 💚 Status: Device Alive");
             println!(
-                "│ Uptime: {}s ({}m / {}h)",
+                "  Device Alive, uptime: {}s ({}m / {}h)",
                 uptime_seconds, uptime_mins, uptime_hours
             );
         }
         DevicePayload::SetDeepSleepTimeSuccess { seconds } => {
-            println!("│ ✅ Status: Set Deep Sleep Time Success");
-            println!("│ Duration: {}s", seconds);
+            println!("  Set Deep Sleep Time Success: {}s", seconds);
         }
         DevicePayload::GetDeepSleepTimeSuccess { seconds } => {
-            println!("│ ✅ Status: Get Deep Sleep Time Success");
-            println!("│ Duration: {}s", seconds);
+            println!("  Get Deep Sleep Time: {}s", seconds);
         }
     }
-    println!("└─────────────────────────────────────\n");
+    println!();
 }
 
 fn print_help() {
-    println!("\n📖 Available Commands:");
+    println!("\nAvailable Commands:");
     println!("  noop                           - Send a no-op command (testing)");
     println!("  frc [ppm]                      - Start forced recalibration (default: 422 ppm)");
     println!("  set-offset <value>             - Set temperature offset in °C");
@@ -220,15 +206,15 @@ fn parse_and_execute(line: &str, commander: &mut Commander) -> anyhow::Result<bo
             print_help();
         }
         "exit" | "quit" | "q" => {
-            println!("👋 Goodbye!");
+            println!("Goodbye!");
             return Ok(false);
         }
         "status" => {
-            println!("🎯 Current device: {}\n", commander.current_device());
+            println!("Current device: {}\n", commander.current_device());
         }
         "device" => {
             if parts.len() < 2 {
-                println!("❌ Usage: device <device_name>\n");
+                println!("Usage: device <device_name>\n");
             } else {
                 commander.set_device(parts[1].to_string());
             }
@@ -246,14 +232,14 @@ fn parse_and_execute(line: &str, commander: &mut Commander) -> anyhow::Result<bo
         }
         "set-offset" => {
             if parts.len() < 2 {
-                println!("❌ Usage: set-offset <value>\n");
+                println!("Usage: set-offset <value>\n");
             } else {
                 match parts[1].parse::<f32>() {
                     Ok(offset) => {
                         commander.send_command(DeviceCommand::SetTempOffset { offset })?;
                     }
                     Err(_) => {
-                        println!("❌ Invalid offset value. Must be a number.\n");
+                        println!("Invalid offset value. Must be a number.\n");
                     }
                 }
             }
@@ -263,14 +249,14 @@ fn parse_and_execute(line: &str, commander: &mut Commander) -> anyhow::Result<bo
         }
         "set-sleep" => {
             if parts.len() < 2 {
-                println!("❌ Usage: set-sleep <seconds>\n");
+                println!("Usage: set-sleep <seconds>\n");
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(seconds) => {
                         commander.send_command(DeviceCommand::SetDeepSleepTime { seconds })?;
                     }
                     Err(_) => {
-                        println!("❌ Invalid seconds value. Must be a number.\n");
+                        println!("Invalid seconds value. Must be a number.\n");
                     }
                 }
             }
@@ -281,7 +267,7 @@ fn parse_and_execute(line: &str, commander: &mut Commander) -> anyhow::Result<bo
         "" => {}
         _ => {
             println!(
-                "❌ Unknown command: '{}'. Type 'help' for available commands.\n",
+                "Unknown command: '{}'. Type 'help' for available commands.\n",
                 parts[0]
             );
         }
@@ -319,11 +305,9 @@ async fn main() -> anyhow::Result<()> {
     // Wait a moment for MQTT to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║              ESP32 Air Quality Commander                 ║");
-    println!("╚═══════════════════════════════════════════════════════════╝");
-    println!("\n🎯 Target device: {}", default_device);
-    println!("💡 Type 'help' for available commands, 'exit' to quit\n");
+    println!("\nESP32 Air Quality Commander");
+    println!("Target device: {}", default_device);
+    println!("Type 'help' for available commands, 'exit' to quit\n");
 
     // Interactive readline loop
     let mut rl = DefaultEditor::new()?;
@@ -340,21 +324,21 @@ async fn main() -> anyhow::Result<()> {
                         Ok(true) => continue,
                         Ok(false) => break,
                         Err(e) => {
-                            println!("❌ Error: {}\n", e);
+                            println!("Error: {}\n", e);
                         }
                     }
                 }
             }
             Err(ReadlineError::Interrupted) => {
                 println!("^C");
-                println!("👋 Use 'exit' or 'quit' to leave");
+                println!("Use 'exit' or 'quit' to leave");
             }
             Err(ReadlineError::Eof) => {
-                println!("👋 Goodbye!");
+                println!("Goodbye!");
                 break;
             }
             Err(err) => {
-                println!("❌ Error: {:?}", err);
+                println!("Error: {:?}", err);
                 break;
             }
         }

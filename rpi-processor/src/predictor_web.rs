@@ -10,15 +10,16 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
 
-#[derive(Clone)]
 pub struct AppState {
     pub influx_host: String,
     pub influx_token: String,
     pub influx_database: String,
     pub reqwest_client: reqwest::Client,
     pub base_path: String,
+    pub cached_training_data: Arc<Mutex<Option<Vec<crate::types::MeasurementWithTime>>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -28,6 +29,28 @@ pub struct AvailableTimestamp {
     pub temperature: f64,
     pub humidity: f64,
     pub device: String,
+}
+
+#[derive(Deserialize)]
+pub struct DateRangeRequest {
+    pub start_date: String,
+    pub end_date: String,
+}
+
+#[derive(Serialize)]
+pub struct DataPoint {
+    pub time: String,
+    pub co2: f64,
+    pub temperature: f64,
+    pub humidity: f64,
+}
+
+#[derive(Deserialize)]
+struct SimpleInfluxRow {
+    time: String,
+    co2_ppm: f64,
+    temperature_c: f64,
+    humidity_percent: f64,
 }
 
 #[derive(Deserialize)]
@@ -90,17 +113,37 @@ pub async fn run_web_server(
         base_path
     };
 
+    log::info!("Loading training data on startup...");
+
+    let reqwest_client = reqwest::Client::new();
+
+    // Fetch and cache training data once at startup
+    let training_data = fetch_and_prepare_training_data(
+        &influx_host,
+        &influx_token,
+        &influx_database,
+        &reqwest_client,
+    )
+    .await?;
+
+    log::info!(
+        "Training data loaded successfully with {} data points!",
+        training_data.len()
+    );
+
     let state = Arc::new(AppState {
         influx_host,
         influx_token,
         influx_database,
-        reqwest_client: reqwest::Client::new(),
+        reqwest_client,
         base_path: base_path.clone(),
+        cached_training_data: Arc::new(Mutex::new(Some(training_data))),
     });
 
     let api_router = Router::new()
         .route("/", get(serve_index))
         .route("/api/available-timestamps", get(get_available_timestamps))
+        .route("/api/data-range", post(get_data_range))
         .route("/api/predict", post(perform_prediction))
         .with_state(state);
 
@@ -150,7 +193,7 @@ async fn get_available_timestamps(
         state.influx_host, state.influx_database
     );
 
-    // Get measurements from the last 4 hours (so we can check for 3h history)
+    // Get all available measurements (no time filter to support old data)
     let sql_query = r#"
         SELECT
             time,
@@ -159,10 +202,95 @@ async fn get_available_timestamps(
             humidity_percent,
             device
         FROM scd40_data
-        WHERE time >= now() - INTERVAL '4 hours'
         ORDER BY time DESC
-        LIMIT 500
+        LIMIT 5000
     "#;
+
+    let response = state
+        .reqwest_client
+        .post(&query_url)
+        .bearer_auth(&state.influx_token)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&serde_json::json!({
+            "db": state.influx_database,
+            "q": sql_query
+        }))?)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no text>".to_string());
+        log::error!("InfluxDB query failed: status={}, body={}", status, body);
+        return Err(AppError::influx_error(format!(
+            "Query failed: {} - {}",
+            status, body
+        )));
+    }
+
+    let response_text = response.text().await?;
+    log::debug!("InfluxDB response text: {}", response_text);
+
+    if response_text.is_empty() {
+        log::warn!("InfluxDB returned empty response");
+        return Ok(Json(Vec::new()));
+    }
+
+    let influx_rows: Vec<InfluxMeasurementRow> = match serde_json::from_str(&response_text) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::error!("Failed to parse InfluxDB response: {}", e);
+            log::error!("Response text was: {}", response_text);
+            return Err(AppError::from(e));
+        }
+    };
+
+    log::info!(
+        "Successfully parsed {} rows from InfluxDB",
+        influx_rows.len()
+    );
+
+    let timestamps: Vec<AvailableTimestamp> = influx_rows
+        .into_iter()
+        .map(|row| AvailableTimestamp {
+            time: row.time,
+            co2: row.co2_ppm,
+            temperature: row.temperature_c,
+            humidity: row.humidity_percent,
+            device: row.device,
+        })
+        .collect();
+
+    log::info!("Returning {} available timestamps", timestamps.len());
+    Ok(Json(timestamps))
+}
+
+async fn get_data_range(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<DateRangeRequest>,
+) -> Result<Json<Vec<DataPoint>>, AppError> {
+    let query_url = format!(
+        "{}/api/v3/query_sql?db={}",
+        state.influx_host, state.influx_database
+    );
+
+    let sql_query = format!(
+        r#"
+        SELECT
+            time,
+            co2_ppm,
+            temperature_c,
+            humidity_percent
+        FROM scd40_data
+        WHERE time >= '{}' AND time <= '{}'
+        ORDER BY time ASC
+        LIMIT 10000
+    "#,
+        request.start_date, request.end_date
+    );
 
     let response = state
         .reqwest_client
@@ -194,26 +322,32 @@ async fn get_available_timestamps(
         return Ok(Json(Vec::new()));
     }
 
-    let influx_rows: Vec<InfluxMeasurementRow> = match serde_json::from_str(&response_text) {
+    let influx_rows: Vec<SimpleInfluxRow> = match serde_json::from_str(&response_text) {
         Ok(rows) => rows,
         Err(e) => {
             log::error!("Failed to parse InfluxDB response: {}", e);
+            log::error!("Response text was: {}", response_text);
             return Err(AppError::from(e));
         }
     };
 
-    let timestamps: Vec<AvailableTimestamp> = influx_rows
+    let data_points: Vec<DataPoint> = influx_rows
         .into_iter()
-        .map(|row| AvailableTimestamp {
+        .map(|row| DataPoint {
             time: row.time,
             co2: row.co2_ppm,
             temperature: row.temperature_c,
             humidity: row.humidity_percent,
-            device: row.device,
         })
         .collect();
 
-    Ok(Json(timestamps))
+    log::info!(
+        "Returning {} data points for range {} to {}",
+        data_points.len(),
+        request.start_date,
+        request.end_date
+    );
+    Ok(Json(data_points))
 }
 
 async fn perform_prediction(
@@ -230,15 +364,8 @@ async fn perform_prediction(
         DateTime::parse_from_rfc3339(&time_with_timezone)?.with_timezone(&Utc)
     };
 
-    // Capture prediction results by running the predictor
-    let result = predict_weather_with_result(
-        &state.influx_host,
-        &state.influx_token,
-        &state.influx_database,
-        &state.reqwest_client,
-        Some(request.timestamp.clone()),
-    )
-    .await;
+    // Use cached training data for faster prediction
+    let result = predict_with_cached_data(&state, prediction_timestamp).await;
 
     match result {
         Ok(pred_result) => Ok(Json(pred_result)),
@@ -262,13 +389,10 @@ async fn perform_prediction(
     }
 }
 
-// Modified version of predict_weather that returns results instead of just logging
-async fn predict_weather_with_result(
-    influx_host: &str,
-    influx_token: &str,
-    influx_database: &str,
-    reqwest_client: &reqwest::Client,
-    prediction_timestamp_str: Option<String>,
+// Fast prediction using cached training data (no need to re-fetch from DB)
+async fn predict_with_cached_data(
+    state: &AppState,
+    input_time: DateTime<Utc>,
 ) -> Result<PredictionResponse, Box<dyn std::error::Error>> {
     use crate::fetcher::fetch_measurement_at;
     use crate::types::MeasurementWithTime;
@@ -279,83 +403,68 @@ async fn predict_weather_with_result(
         XGRegressorParameters as GradientBoostingRegressorParameters,
     };
 
-    let prediction_timestamp = if let Some(ts_str) = &prediction_timestamp_str {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(ts_str) {
-            Some(dt.with_timezone(&Utc))
-        } else {
-            let time_with_timezone = format!("{}Z", ts_str);
-            Some(DateTime::parse_from_rfc3339(&time_with_timezone)?.with_timezone(&Utc))
-        }
-    } else {
-        None
+    // Get the measurement at the input time
+    let latest_measurement = fetch_measurement_at(
+        &state.influx_host,
+        &state.influx_token,
+        &state.influx_database,
+        &state.reqwest_client,
+        input_time,
+    )
+    .await?
+    .ok_or("No measurement found near the selected time")?;
+
+    // Get cached training data
+    let training_data_lock = state.cached_training_data.lock().await;
+    let training_data = training_data_lock
+        .as_ref()
+        .ok_or("Training data not loaded yet")?;
+
+    let find_past = |target_time: DateTime<Utc>| -> Option<&MeasurementWithTime> {
+        training_data
+            .iter()
+            .filter(|m| m.time <= target_time)
+            .min_by_key(|m| {
+                let diff = target_time.signed_duration_since(m.time);
+                diff.num_seconds().abs()
+            })
     };
 
-    // Fetch and prepare training data
-    let mut measurements = fetch_training_data_internal(
-        influx_host,
-        influx_token,
-        influx_database,
-        reqwest_client,
-        prediction_timestamp,
-    )
-    .await?;
+    let p15_data = find_past(input_time - chrono::Duration::minutes(15))
+        .ok_or("Could not find measurement 15 minutes before selected time")?
+        .clone();
+    let p1h_data = find_past(input_time - chrono::Duration::hours(1))
+        .ok_or("Could not find measurement 1 hour before selected time")?
+        .clone();
+    let p3h_data = find_past(input_time - chrono::Duration::hours(3))
+        .ok_or("Could not find measurement 3 hours before selected time")?
+        .clone();
 
-    if measurements.is_empty() {
-        return Err("No data found for training".into());
-    }
+    let target_time = input_time + chrono::Duration::hours(1);
 
-    let anomalies =
-        fetch_anomalies_internal(influx_host, influx_token, influx_database, reqwest_client)
-            .await?;
+    // Clone training data to avoid holding lock during model training
+    let training_data_clone = training_data.clone();
 
-    measurements.retain(|m| !anomalies.contains(&m.time));
+    // Release the lock before training
+    drop(training_data_lock);
 
-    if measurements.len() < 100 {
-        return Err("Not enough data after filtering for training".into());
-    }
-
-    measurements.sort_by_key(|m| m.time);
-
+    // Build training data using cached data
     let gbm_params = GradientBoostingRegressorParameters::default()
         .with_n_estimators(150)
         .with_learning_rate(0.1)
         .with_max_depth(3);
 
-    // Prepare training data
     let mut x_base_data = Vec::new();
     let mut y_co2 = Vec::new();
     let mut y_temp = Vec::new();
     let mut y_humidity = Vec::new();
 
-    let find_past =
-        |target_time: DateTime<Utc>, current_idx: usize| -> Option<&MeasurementWithTime> {
-            let start_search = if current_idx > 400 {
-                current_idx - 400
-            } else {
-                0
-            };
-            for j in (start_search..current_idx).rev() {
-                let m = &measurements[j];
-                let diff = target_time
-                    .signed_duration_since(m.time)
-                    .num_minutes()
-                    .abs();
-                if diff <= 10 {
-                    return Some(m);
-                }
-                if m.time < target_time - chrono::Duration::minutes(20) {
-                    return None;
-                }
-            }
-            None
-        };
-
-    for (i, m_current) in measurements.iter().enumerate() {
-        let target_time = m_current.time + chrono::Duration::hours(1);
+    for (i, m_current) in training_data_clone.iter().enumerate() {
+        let m_target_time = m_current.time + chrono::Duration::hours(1);
         let mut m_future_opt = None;
 
-        for m_next in measurements.iter().skip(i + 1) {
-            let diff = m_next.time.signed_duration_since(target_time);
+        for m_next in training_data_clone.iter().skip(i + 1) {
+            let diff = m_next.time.signed_duration_since(m_target_time);
             if diff.num_minutes().abs() <= 5 {
                 m_future_opt = Some(m_next);
                 break;
@@ -364,46 +473,69 @@ async fn predict_weather_with_result(
             }
         }
 
-        if let Some(m_future) = m_future_opt {
-            let m_15m = find_past(m_current.time - chrono::Duration::minutes(15), i);
-            let m_1h = find_past(m_current.time - chrono::Duration::hours(1), i);
-            let m_3h = find_past(m_current.time - chrono::Duration::hours(3), i);
-
-            if let (Some(m_15m), Some(m_1h), Some(m_3h)) = (m_15m, m_1h, m_3h) {
-                let hour = m_current.time.hour() as f64;
-                let minute = m_current.time.minute() as f64;
-                let weekday = m_current.time.weekday().num_days_from_monday() as f64;
-
-                x_base_data.push(vec![
-                    hour,
-                    minute,
-                    weekday,
-                    m_current.co2 as f64,
-                    m_current.co2 as f64 - m_15m.co2 as f64,
-                    m_current.co2 as f64 - m_1h.co2 as f64,
-                    m_current.co2 as f64 - m_3h.co2 as f64,
-                    m_current.temperature as f64,
-                    m_current.temperature as f64 - m_15m.temperature as f64,
-                    m_current.temperature as f64 - m_1h.temperature as f64,
-                    m_current.temperature as f64 - m_3h.temperature as f64,
-                    m_current.humidity as f64,
-                    m_current.humidity as f64 - m_15m.humidity as f64,
-                    m_current.humidity as f64 - m_1h.humidity as f64,
-                    m_current.humidity as f64 - m_3h.humidity as f64,
-                ]);
-
-                y_co2.push(m_future.co2 as f64);
-                y_temp.push(m_future.temperature as f64);
-                y_humidity.push(m_future.humidity as f64);
-            }
+        if m_future_opt.is_none() {
+            continue;
         }
+        let m_future = m_future_opt.unwrap();
+
+        let find_past_for_training =
+            |target_time: DateTime<Utc>, current_idx: usize| -> Option<&MeasurementWithTime> {
+                let start_search = if current_idx > 400 {
+                    current_idx - 400
+                } else {
+                    0
+                };
+                training_data_clone[start_search..current_idx]
+                    .iter()
+                    .rev()
+                    .find(|m| {
+                        let diff = target_time.signed_duration_since(m.time);
+                        diff.num_minutes().abs() <= 5
+                    })
+            };
+
+        let p15 = find_past_for_training(m_current.time - chrono::Duration::minutes(15), i);
+        let p1h = find_past_for_training(m_current.time - chrono::Duration::hours(1), i);
+        let p3h = find_past_for_training(m_current.time - chrono::Duration::hours(3), i);
+
+        if p15.is_none() || p1h.is_none() || p3h.is_none() {
+            continue;
+        }
+        let (p15, p1h, p3h) = (p15.unwrap(), p1h.unwrap(), p3h.unwrap());
+
+        let hour = m_current.time.hour() as f64;
+        let minute = m_current.time.minute() as f64;
+        let weekday = m_current.time.weekday().num_days_from_monday() as f64;
+
+        let features = vec![
+            hour,
+            minute,
+            weekday,
+            m_current.co2 as f64,
+            m_current.co2 as f64 - p15.co2 as f64,
+            m_current.co2 as f64 - p1h.co2 as f64,
+            m_current.co2 as f64 - p3h.co2 as f64,
+            m_current.temperature as f64,
+            m_current.temperature as f64 - p15.temperature as f64,
+            m_current.temperature as f64 - p1h.temperature as f64,
+            m_current.temperature as f64 - p3h.temperature as f64,
+            m_current.humidity as f64,
+            m_current.humidity as f64 - p15.humidity as f64,
+            m_current.humidity as f64 - p1h.humidity as f64,
+            m_current.humidity as f64 - p3h.humidity as f64,
+        ];
+
+        x_base_data.push(features);
+        y_co2.push(m_future.co2 as f64);
+        y_temp.push(m_future.temperature as f64);
+        y_humidity.push(m_future.humidity as f64);
     }
 
-    if x_base_data.is_empty() {
-        return Err("No training samples found".into());
+    if x_base_data.len() < 100 {
+        return Err("Not enough training data after filtering".into());
     }
 
-    // Train models
+    // Train models quickly using cached data
     let x_co2_mat = DenseMatrix::from_2d_vec(&x_base_data)?;
     let model_co2 = GradientBoostingRegressor::fit(&x_co2_mat, &y_co2, gbm_params.clone())?;
 
@@ -422,89 +554,64 @@ async fn predict_weather_with_result(
     let model_humidity =
         GradientBoostingRegressor::fit(&x_hum_mat, &y_humidity, gbm_params.clone())?;
 
-    // Predict
-    let latest_measurement = measurements.last().ok_or("No measurements available")?;
-    let latest_idx = measurements.len() - 1;
-
-    let p15 = find_past(
-        latest_measurement.time - chrono::Duration::minutes(15),
-        latest_idx,
-    );
-    let p1h = find_past(
-        latest_measurement.time - chrono::Duration::hours(1),
-        latest_idx,
-    );
-    let p3h = find_past(
-        latest_measurement.time - chrono::Duration::hours(3),
-        latest_idx,
-    );
-
-    if p15.is_none() || p1h.is_none() || p3h.is_none() {
-        return Err(
-            "Could not find full historical context (15m, 1h, 3h) for latest measurement".into(),
-        );
-    }
-    let (p15, p1h, p3h) = (p15.unwrap(), p1h.unwrap(), p3h.unwrap());
-
-    let target_time = latest_measurement.time + chrono::Duration::hours(1);
+    // Now make prediction
     let pred_hour = target_time.hour() as f64;
     let pred_minute = target_time.minute() as f64;
     let pred_weekday = target_time.weekday().num_days_from_monday() as f64;
 
-    let mut input_vec = vec![
+    let input_vec = vec![
         pred_hour,
         pred_minute,
         pred_weekday,
         latest_measurement.co2 as f64,
-        latest_measurement.co2 as f64 - p15.co2 as f64,
-        latest_measurement.co2 as f64 - p1h.co2 as f64,
-        latest_measurement.co2 as f64 - p3h.co2 as f64,
+        latest_measurement.co2 as f64 - p15_data.co2 as f64,
+        latest_measurement.co2 as f64 - p1h_data.co2 as f64,
+        latest_measurement.co2 as f64 - p3h_data.co2 as f64,
         latest_measurement.temperature as f64,
-        latest_measurement.temperature as f64 - p15.temperature as f64,
-        latest_measurement.temperature as f64 - p1h.temperature as f64,
-        latest_measurement.temperature as f64 - p3h.temperature as f64,
+        latest_measurement.temperature as f64 - p15_data.temperature as f64,
+        latest_measurement.temperature as f64 - p1h_data.temperature as f64,
+        latest_measurement.temperature as f64 - p3h_data.temperature as f64,
         latest_measurement.humidity as f64,
-        latest_measurement.humidity as f64 - p15.humidity as f64,
-        latest_measurement.humidity as f64 - p1h.humidity as f64,
-        latest_measurement.humidity as f64 - p3h.humidity as f64,
+        latest_measurement.humidity as f64 - p15_data.humidity as f64,
+        latest_measurement.humidity as f64 - p1h_data.humidity as f64,
+        latest_measurement.humidity as f64 - p3h_data.humidity as f64,
     ];
 
     let x_pred_co2 = DenseMatrix::from_2d_vec(&vec![input_vec.clone()])?;
     let pred_co2_val = model_co2.predict(&x_pred_co2)?[0];
 
-    input_vec.push(pred_co2_val);
-    let x_pred_temp = DenseMatrix::from_2d_vec(&vec![input_vec.clone()])?;
+    let mut input_vec_temp = input_vec.clone();
+    input_vec_temp.push(pred_co2_val);
+    let x_pred_temp = DenseMatrix::from_2d_vec(&vec![input_vec_temp])?;
     let pred_temp_val = model_temp.predict(&x_pred_temp)?[0];
 
-    input_vec.push(pred_temp_val);
-    let x_pred_hum = DenseMatrix::from_2d_vec(&vec![input_vec.clone()])?;
+    let mut input_vec_hum = input_vec.clone();
+    input_vec_hum.push(pred_co2_val);
+    input_vec_hum.push(pred_temp_val);
+    let x_pred_hum = DenseMatrix::from_2d_vec(&vec![input_vec_hum])?;
     let pred_humidity_val = model_humidity.predict(&x_pred_hum)?[0];
 
     // Try to fetch actual values if available
-    let actual = if prediction_timestamp.is_some() {
-        fetch_measurement_at(
-            influx_host,
-            influx_token,
-            influx_database,
-            reqwest_client,
-            target_time,
-        )
-        .await?
-        .map(|actual| ActualValues {
-            co2: actual.co2 as f64,
-            temperature: actual.temperature as f64,
-            humidity: actual.humidity as f64,
-            co2_diff: pred_co2_val - actual.co2 as f64,
-            temperature_diff: pred_temp_val - actual.temperature as f64,
-            humidity_diff: pred_humidity_val - actual.humidity as f64,
-        })
-    } else {
-        None
-    };
+    let actual = fetch_measurement_at(
+        &state.influx_host,
+        &state.influx_token,
+        &state.influx_database,
+        &state.reqwest_client,
+        target_time,
+    )
+    .await?
+    .map(|actual| ActualValues {
+        co2: actual.co2 as f64,
+        temperature: actual.temperature as f64,
+        humidity: actual.humidity as f64,
+        co2_diff: pred_co2_val - actual.co2 as f64,
+        temperature_diff: pred_temp_val - actual.temperature as f64,
+        humidity_diff: pred_humidity_val - actual.humidity as f64,
+    });
 
     Ok(PredictionResponse {
         success: true,
-        input_time: latest_measurement.time.to_rfc3339(),
+        input_time: input_time.to_rfc3339(),
         prediction_time: target_time.to_rfc3339(),
         input: InputConditions {
             co2: latest_measurement.co2 as f64,
@@ -519,6 +626,41 @@ async fn predict_weather_with_result(
         actual,
         error: None,
     })
+}
+
+// Fetch and prepare training data once
+async fn fetch_and_prepare_training_data(
+    influx_host: &str,
+    influx_token: &str,
+    influx_database: &str,
+    reqwest_client: &reqwest::Client,
+) -> Result<Vec<crate::types::MeasurementWithTime>, Box<dyn std::error::Error>> {
+    // Fetch all training data
+    let mut measurements = fetch_training_data_internal(
+        influx_host,
+        influx_token,
+        influx_database,
+        reqwest_client,
+        None, // No time limit - get all data
+    )
+    .await?;
+
+    if measurements.is_empty() {
+        return Err("No data found for training".into());
+    }
+
+    let anomalies =
+        fetch_anomalies_internal(influx_host, influx_token, influx_database, reqwest_client)
+            .await?;
+    measurements.retain(|m| !anomalies.contains(&m.time));
+
+    if measurements.len() < 100 {
+        return Err("Not enough data after filtering for training".into());
+    }
+
+    measurements.sort_by_key(|m| m.time);
+
+    Ok(measurements)
 }
 
 async fn fetch_training_data_internal(
