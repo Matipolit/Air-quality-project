@@ -75,7 +75,7 @@ fn publish_device_payload(client: &mut EspMqttClient, payload: DevicePayload) ->
     let topic = MQTT_TOPIC_SENSOR;
     let message = DeviceMessage {
         device: DEVICE_NAME.to_string(),
-        payload: payload,
+        payload,
     };
     let mqtt_payload = serde_json::to_vec(&message)?;
     info!("MQTT Publish: {} bytes", mqtt_payload.len());
@@ -183,7 +183,10 @@ fn perform_measurement(
         info!("Reading measurement data...");
         match scd40.measurement() {
             Ok(data) => {
-                info!("CO2: {} ppm, Temperature: {:.2} °C, Humidity: {:.2} %", data.co2, data.temperature, data.humidity);
+                info!(
+                    "CO2: {} ppm, Temperature: {:.2} °C, Humidity: {:.2} %",
+                    data.co2, data.temperature, data.humidity
+                );
                 Some(data)
             }
             Err(e) => {
@@ -224,7 +227,10 @@ fn perform_frc(
     target_ppm: u16,
     mqtt_client: &mut EspMqttClient,
 ) -> Result<DevicePayload> {
-    publish_device_payload(mqtt_client, DevicePayload::FrcStart { target_ppm });
+    if let Err(error) = publish_device_payload(mqtt_client, DevicePayload::FrcStart { target_ppm })
+    {
+        info!("Failed to publish FRC start status: {:?}", error);
+    }
     info!(
         "Starting calibration procedure with target {} ppm.",
         target_ppm
@@ -237,19 +243,25 @@ fn perform_frc(
 
     FreeRtos::delay_ms(180_000);
 
-    publish_device_payload(
+    if let Err(error) = publish_device_payload(
         mqtt_client,
         DevicePayload::FrcWarmupComplete {
             detail: "Took 3 minutes".to_string(),
         },
-    );
+    ) {
+        info!("Failed to publish FRC warmup-complete status: {:?}", error);
+    }
 
     info!("Warmup complete. Stopping sensor.");
 
     stop_periodic_measurement(scd40)?;
 
     info!("Performing FRC with target {} ppm...", target_ppm);
-    publish_device_payload(mqtt_client, DevicePayload::FrcCalibrating { target_ppm });
+    if let Err(error) =
+        publish_device_payload(mqtt_client, DevicePayload::FrcCalibrating { target_ppm })
+    {
+        info!("Failed to publish FRC calibrating status: {:?}", error);
+    }
     let frc_result = scd40.forced_recalibration(target_ppm);
     FreeRtos::delay_ms(400);
 
@@ -403,20 +415,20 @@ fn main() -> Result<()> {
                 EventPayload::Disconnected => {
                     info!("MQTT disconnected");
                 }
-                EventPayload::Received { data, topic, .. } => {
-                    if topic == Some(MQTT_COMMAND_TOPIC) && !data.is_empty() {
-                        info!("Received command payload: {:?}", std::str::from_utf8(data));
-                        match serde_json::from_slice::<DeviceCommand>(data) {
-                            Ok(command) => {
-                                info!("Parsed command: {:?}", command);
-                                // Wyślij komendę do głównego wątku
-                                if let Err(e) = cmd_tx.send(command) {
-                                    info!("Failed to send command to main thread: {:?}", e);
-                                }
+                EventPayload::Received { data, topic, .. }
+                    if topic == Some(MQTT_COMMAND_TOPIC) && !data.is_empty() =>
+                {
+                    info!("Received command payload: {:?}", std::str::from_utf8(data));
+                    match serde_json::from_slice::<DeviceCommand>(data) {
+                        Ok(command) => {
+                            info!("Parsed command: {:?}", command);
+                            // Wyślij komendę do głównego wątku
+                            if let Err(e) = cmd_tx.send(command) {
+                                info!("Failed to send command to main thread: {:?}", e);
                             }
-                            Err(e) => {
-                                info!("Failed to parse command JSON: {:?}", e);
-                            }
+                        }
+                        Err(e) => {
+                            info!("Failed to parse command JSON: {:?}", e);
                         }
                     }
                 }
@@ -492,7 +504,9 @@ fn main() -> Result<()> {
         },
     };
 
-    publish_device_payload(&mut mqtt_client, final_device_payload);
+    if let Err(error) = publish_device_payload(&mut mqtt_client, final_device_payload) {
+        info!("Failed to publish final device payload: {:?}", error);
+    }
 
     FreeRtos::delay_ms(2000); // Time to send
 
