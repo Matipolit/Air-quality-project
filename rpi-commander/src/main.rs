@@ -70,7 +70,6 @@ async fn handle_mqtt_events(
     client: &Client,
     mut connection: rumqttc::Connection,
 ) -> anyhow::Result<()> {
-    // Subscribe to all device sensor topics
     let response_topic = "sensors/+/sensor";
     info!("Subscribing to responses on topic '{}'", response_topic);
     client.subscribe(response_topic, QoS::AtLeastOnce)?;
@@ -195,7 +194,7 @@ fn print_help() {
 }
 
 fn parse_and_execute(line: &str, commander: &mut Commander) -> anyhow::Result<bool> {
-    let parts: Vec<&str> = line.trim().split_whitespace().collect();
+    let parts: Vec<&str> = line.split_whitespace().collect();
 
     if parts.is_empty() {
         return Ok(true);
@@ -295,21 +294,18 @@ async fn main() -> anyhow::Result<()> {
         default_device.clone(),
     )));
 
-    // Spawn MQTT event loop in background
     let mqtt_handle = tokio::spawn(async move {
         if let Err(e) = handle_mqtt_events(&client, connection).await {
             error!("MQTT error: {:?}", e);
         }
     });
 
-    // Wait a moment for MQTT to connect
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     println!("\nESP32 Air Quality Commander");
     println!("Target device: {}", default_device);
     println!("Type 'help' for available commands, 'exit' to quit\n");
 
-    // Interactive readline loop
     let mut rl = DefaultEditor::new()?;
 
     loop {

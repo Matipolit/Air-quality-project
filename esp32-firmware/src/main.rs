@@ -147,12 +147,7 @@ fn stop_periodic_measurement(scd40: &mut Scd4x<I2cDriver<'_>, Ets>) -> Result<()
 
 fn clear_retained_command(client: &mut EspMqttClient) -> Result<()> {
     info!("Clearing retained command from broker...");
-    client.publish(
-        MQTT_COMMAND_TOPIC,
-        QoS::AtLeastOnce,
-        true, // RETAIN = true
-        "".as_bytes(),
-    )?;
+    client.publish(MQTT_COMMAND_TOPIC, QoS::AtLeastOnce, true, "".as_bytes())?;
     Ok(())
 }
 
@@ -220,7 +215,6 @@ fn perform_measurement(
     Ok(final_mqtt_message)
 }
 
-// Forced recalibration
 fn perform_frc(
     scd40: &mut Scd4x<I2cDriver<'_>, Ets>,
     led: &mut PinDriver<'_, esp_idf_hal::gpio::Gpio2, esp_idf_hal::gpio::Output>,
@@ -288,10 +282,9 @@ fn perform_set_temp_offset(
     let final_device_payload = match scd40.set_temperature_offset(offset) {
         Ok(_) => {
             info!("Temperature offset set to {}. Persisting...", offset);
-            // save to eeprom
             match scd40.persist_settings() {
                 Ok(_) => {
-                    FreeRtos::delay_ms(800); // Poczekaj na zapis (wg datasheet 800ms)
+                    FreeRtos::delay_ms(800); // Wait 800ms for write (per datasheet)
                     info!("Temperature offset persisted to EEPROM");
                     DevicePayload::SetOffsetSuccess { offset }
                 }
@@ -341,7 +334,6 @@ fn main() -> Result<()> {
     info!("LED initialized on GPIO2");
     blink_led(&mut led, 1);
 
-    // Setup I2C
     let i2c_config = i2c::config::Config::new().baudrate(Hertz(100_000));
     info!("Initializing I2C on GPIO21 (SDA) and GPIO22 (SCL)...");
     let i2c_driver = I2cDriver::new(
@@ -352,21 +344,17 @@ fn main() -> Result<()> {
     )?;
     let delay = Ets;
 
-    // Setup SCD40
     info!("Initializing SCD40 sensor driver...");
     let mut scd40 = Scd4x::new(i2c_driver, delay);
     info!("Waiting 1.1 seconds for sensor to enter idle state...");
     FreeRtos::delay_ms(1100);
 
-    // NVS initialization
     info!("Initializing NVS...");
     let nvs_default = EspDefaultNvsPartition::take()?;
     let mut nvs = EspNvs::new(nvs_default.clone(), NVS_NAMESPACE, true)?;
 
-    // Read deep sleep time from NVS or use default
     let mut deep_sleep_seconds = read_deep_sleep_from_nvs(&nvs);
 
-    // Network initialization
     info!("Initializing WiFi...");
     let sys_loop = EspSystemEventLoop::take()?;
     let mut wifi = BlockingWifi::wrap(
@@ -392,24 +380,19 @@ fn main() -> Result<()> {
         }
     }
 
-    // MQTT initialization
     info!("Initializing MQTT client...");
     let mqtt_config = MqttClientConfiguration::default();
     let (mut mqtt_client, mut mqtt_conn) = EspMqttClient::new(MQTT_BROKER_URL, &mqtt_config)?;
 
-    // Channel for communication between the MQTT thread and the main thread
     let (cmd_tx, cmd_rx): (Sender<DeviceCommand>, Receiver<DeviceCommand>) = mpsc::channel();
 
-    // Channel for connected status
     let (connected_tx, connected_rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
 
-    // MQTT thread
     std::thread::spawn(move || {
         while let Ok(event) = mqtt_conn.next() {
             match event.payload() {
                 EventPayload::Connected(_) => {
                     info!("MQTT connected to broker");
-                    // signal we're connected
                     let _ = connected_tx.send(true);
                 }
                 EventPayload::Disconnected => {
@@ -422,7 +405,6 @@ fn main() -> Result<()> {
                     match serde_json::from_slice::<DeviceCommand>(data) {
                         Ok(command) => {
                             info!("Parsed command: {:?}", command);
-                            // Wyślij komendę do głównego wątku
                             if let Err(e) = cmd_tx.send(command) {
                                 info!("Failed to send command to main thread: {:?}", e);
                             }
@@ -441,14 +423,12 @@ fn main() -> Result<()> {
     match connected_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(_) => {
             info!("MQTT connection established");
-            // Now it's safe to subscribe
             info!("Subscribing to command topic: {}", MQTT_COMMAND_TOPIC);
             mqtt_client.subscribe(MQTT_COMMAND_TOPIC, QoS::AtLeastOnce)?;
             info!("Subscribed successfully");
         }
         Err(_) => {
             info!("Timeout waiting for MQTT connection, continuing anyway...");
-            // Try to subscribe anyway, it might work
             info!(
                 "Attempting to subscribe to command topic: {}",
                 MQTT_COMMAND_TOPIC
@@ -458,7 +438,6 @@ fn main() -> Result<()> {
     }
 
     info!("Waiting max 1s for a command from MQTT...");
-    // commands are retained so we don't need to wait long
     let received_cmd = cmd_rx.recv_timeout(Duration::from_secs(1));
 
     let command = match received_cmd {
@@ -472,9 +451,6 @@ fn main() -> Result<()> {
         }
     };
 
-    // main logic
-
-    // always clear retained command before proceeding
     if !matches!(command, DeviceCommand::NoOp) {
         match clear_retained_command(&mut mqtt_client) {
             Ok(_) => info!("Retained command cleared"),
@@ -512,20 +488,15 @@ fn main() -> Result<()> {
 
     info!("Cycle complete");
 
-    // Power down peripherals before deep sleep
     info!("Shutting down peripherals...");
 
-    // Turn off LED
     let _ = led.set_low();
 
-    // Stop SCD40 periodic measurement to save power
     let _ = scd40.stop_periodic_measurement();
     FreeRtos::delay_ms(500);
 
-    // Disconnect MQTT
     drop(mqtt_client);
 
-    // Disconnect and stop WiFi
     info!("Disconnecting WiFi...");
     let _ = wifi.disconnect();
     FreeRtos::delay_ms(100);
@@ -534,7 +505,6 @@ fn main() -> Result<()> {
 
     info!("All peripherals powered down.");
 
-    // Enter deep sleep
     let sleep_duration_us: u64 = deep_sleep_seconds * 1000 * 1000;
     info!(
         "Entering deep sleep for {} seconds...\n",
