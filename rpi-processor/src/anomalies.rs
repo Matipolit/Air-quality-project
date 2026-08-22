@@ -6,27 +6,23 @@ use crate::types::MeasurementWithTime;
 
 #[derive(Clone, Debug)]
 pub struct AnomalyConfig {
-    // Humidity thresholds
     /// Humidity below this is definitely anomalous (sunlight dip)
-    pub humidity_definite_anomaly: f32, // 55%
+    pub humidity_definite_anomaly: f32,
     /// Humidity below this is suspicious, needs temp confirmation
-    pub humidity_suspicious: f32, // 65%
+    pub humidity_suspicious: f32,
 
-    // Temperature thresholds
     /// If current temp is this many degrees above daily minimum, it's a spike
-    pub temp_above_daily_min: f32, // 8°C
+    pub temp_above_daily_min: f32,
     /// Absolute minimum temp to consider as a spike (avoid flagging cold days)
-    pub temp_absolute_min_for_spike: f32, // 12°C
+    pub temp_absolute_min_for_spike: f32,
 
-    // Time constraints
     /// Earliest hour for sunlight detection (24h format)
-    pub daylight_start_hour: u32, // 6
+    pub daylight_start_hour: u32,
     /// Latest hour for sunlight detection (24h format)
-    pub daylight_end_hour: u32, // 18
+    pub daylight_end_hour: u32,
 
-    // CO2 thresholds
     /// CO2 above this is anomalous
-    pub co2_spike_threshold: f32, // 700 ppm
+    pub co2_spike_threshold: f32,
 }
 
 impl Default for AnomalyConfig {
@@ -43,7 +39,7 @@ impl Default for AnomalyConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AnomalyFlags {
     pub temperature_spike: bool,
     pub humidity_spike: bool,
@@ -58,20 +54,6 @@ pub struct AnomalyFlags {
 impl AnomalyFlags {
     pub fn is_any_true(&self) -> bool {
         self.temperature_spike || self.humidity_spike || self.co2_spike || self.possible_sunlight
-    }
-}
-
-impl Default for AnomalyFlags {
-    fn default() -> Self {
-        Self {
-            temperature_spike: false,
-            humidity_spike: false,
-            co2_spike: false,
-            possible_sunlight: false,
-            physical_constraint_temp_violation: false,
-            physical_constraint_humidity_violation: false,
-            physical_constraint_co2_violation: false,
-        }
     }
 }
 
@@ -123,7 +105,6 @@ impl DailyStats {
     pub fn update(&mut self, measurement: &MeasurementWithTime) {
         let current_date = (measurement.time.year(), measurement.time.ordinal());
 
-        // Reset if new day
         if self.date != Some(current_date) {
             self.date = Some(current_date);
             self.temp_min = measurement.temperature;
@@ -143,12 +124,8 @@ impl DailyStats {
 
 pub struct AnomalyDetector {
     pub config: AnomalyConfig,
-    /// Stats for current day
     current_day_stats: DailyStats,
-    /// Stats from previous days (for baseline comparison)
-    /// Key: (year, day_of_year), Value: DailyStats
     historical_daily_stats: Vec<DailyStats>,
-    /// Recent measurements for context (last 2 hours = ~30 measurements at 4-min interval)
     recent_measurements: Vec<MeasurementWithTime>,
 }
 
@@ -171,7 +148,6 @@ impl AnomalyDetector {
         }
     }
 
-    /// Pre-compute daily stats from historical data
     pub fn build_profile(&mut self, measurements: &[MeasurementWithTime]) {
         self.historical_daily_stats.clear();
 
@@ -181,7 +157,6 @@ impl AnomalyDetector {
             let m_date = (m.time.year(), m.time.ordinal());
 
             if current_stats.date != Some(m_date) {
-                // Save previous day's stats if we have data
                 if current_stats.measurement_count > 0 {
                     self.historical_daily_stats.push(current_stats.clone());
                 }
@@ -191,7 +166,6 @@ impl AnomalyDetector {
             current_stats.update(m);
         }
 
-        // Don't forget the last day
         if current_stats.measurement_count > 0 {
             self.historical_daily_stats.push(current_stats);
         }
@@ -202,11 +176,7 @@ impl AnomalyDetector {
         );
     }
 
-    /// Get the baseline temperature for comparison
-    /// Uses the minimum temp from before the current hour (pre-sunlight baseline)
     fn get_pre_sunlight_baseline(&self, current_time: DateTime<Utc>) -> Option<f32> {
-        // Find measurements from earlier today (before potential sunlight)
-        // Use measurements from midnight to 7 AM as baseline
         let baseline_temps: Vec<f32> = self
             .recent_measurements
             .iter()
@@ -219,13 +189,11 @@ impl AnomalyDetector {
             .collect();
 
         if baseline_temps.len() >= 3 {
-            // Use median of early morning temps
             let mut temps = baseline_temps;
             temps.sort_by(|a, b| a.partial_cmp(b).unwrap());
             return Some(temps[temps.len() / 2]);
         }
 
-        // Fall back: use minimum from recent measurements
         if self.recent_measurements.len() >= 10 {
             return self
                 .recent_measurements
@@ -237,15 +205,12 @@ impl AnomalyDetector {
         None
     }
 
-    /// Analyze a single measurement
     pub fn analyze(&mut self, measurement: &MeasurementWithTime, debug: bool) -> AnomalyFlags {
         let mut flags = AnomalyFlags::default();
 
-        // Update tracking
         self.current_day_stats.update(measurement);
         self.recent_measurements.push(measurement.clone());
 
-        // Keep only last 3 hours of measurements (~45 at 4-min interval)
         let cutoff = measurement.time - chrono::Duration::hours(3);
         self.recent_measurements.retain(|m| m.time > cutoff);
 
@@ -272,13 +237,11 @@ impl AnomalyDetector {
         }
 
         if humidity <= self.config.humidity_suspicious && !flags.humidity_spike {
-            // Get baseline temp for comparison
             let baseline_temp = self.get_pre_sunlight_baseline(measurement.time);
 
             if let Some(baseline) = baseline_temp {
                 let temp_rise = temp - baseline;
 
-                // If temp is elevated above baseline, confirm as sunlight
                 if temp_rise >= self.config.temp_above_daily_min
                     && temp >= self.config.temp_absolute_min_for_spike
                 {
@@ -297,39 +260,35 @@ impl AnomalyDetector {
                         );
                     }
                 }
-            } else if is_daylight_hours {
-                // No baseline available, but suspicious humidity during daylight
-                // Check if temp is absolutely high
-                if temp >= self.config.temp_absolute_min_for_spike {
-                    flags.humidity_spike = true;
-                    if debug {
-                        log::debug!(
-                            "Suspicious humidity during daylight: {:.1}% with temp {:.1}°C",
-                            humidity,
-                            temp
-                        );
-                    }
+            } else if is_daylight_hours && temp >= self.config.temp_absolute_min_for_spike {
+                flags.humidity_spike = true;
+                if debug {
+                    log::debug!(
+                        "Suspicious humidity during daylight: {:.1}% with temp {:.1}°C",
+                        humidity,
+                        temp
+                    );
                 }
             }
         }
 
-        if !flags.temperature_spike {
-            if let Some(baseline) = self.get_pre_sunlight_baseline(measurement.time) {
-                let temp_rise = temp - baseline;
+        if !flags.temperature_spike
+            && let Some(baseline) = self.get_pre_sunlight_baseline(measurement.time)
+        {
+            let temp_rise = temp - baseline;
 
-                if temp_rise >= self.config.temp_above_daily_min
-                    && temp >= self.config.temp_absolute_min_for_spike
-                    && is_daylight_hours
-                {
-                    flags.temperature_spike = true;
-                    if debug {
-                        log::debug!(
-                            "Temperature spike: {:.1}°C (+{:.1}°C from baseline {:.1}°C)",
-                            temp,
-                            temp_rise,
-                            baseline
-                        );
-                    }
+            if temp_rise >= self.config.temp_above_daily_min
+                && temp >= self.config.temp_absolute_min_for_spike
+                && is_daylight_hours
+            {
+                flags.temperature_spike = true;
+                if debug {
+                    log::debug!(
+                        "Temperature spike: {:.1}°C (+{:.1}°C from baseline {:.1}°C)",
+                        temp,
+                        temp_rise,
+                        baseline
+                    );
                 }
             }
         }
@@ -367,7 +326,6 @@ pub struct BatchAnalysisResult {
     pub anomaly_timestamps: Vec<(DateTime<Utc>, AnomalyFlags, String)>,
 }
 
-/// Analyze a batch of historical measurements
 pub fn analyze_historical_data(
     measurements: &[MeasurementWithTime],
     config: Option<AnomalyConfig>,

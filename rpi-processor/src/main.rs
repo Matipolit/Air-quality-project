@@ -1,7 +1,4 @@
 mod anomalies;
-mod fetcher;
-mod predictor;
-mod predictor_web;
 mod types;
 
 use chrono::{DateTime, Utc};
@@ -18,43 +15,18 @@ use types::{InfluxMeasurementRow, MeasurementWithTime};
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Mark historical measurements from influxDB for anomalies
     #[arg(short, long, default_value_t = false)]
     mark_historical_data: bool,
 
-    /// Delete old markings from influxDB for anomalies
     #[arg(short, long, default_value_t = false)]
     delete_old_markings: bool,
 
-    /// Receive live data from MQTT broker and save it to influxDB
     #[arg(short, long, default_value_t = false)]
     receive_live_data: bool,
-
-    /// Predict weather (CO2, Temp, Humidity) based on historical data
-    #[arg(short, long, default_value_t = false)]
-    predict_weather: bool,
-
-    /// Timestamp to use as "now" for prediction (RFC3339 format).
-    /// If provided, the model will be trained on data before this time,
-    /// and predict the weather 1 hour after this time, comparing it with actual data.
-    #[arg(long)]
-    prediction_timestamp: Option<String>,
 
     /// Run a matrix of anomaly detection tests with different parameters
     #[arg(long, default_value_t = false)]
     mark_anomalies_test: bool,
-
-    /// Run web server for predictor UI
-    #[arg(short = 'w', long, default_value_t = false)]
-    web_server: bool,
-
-    /// Port for web server
-    #[arg(long, default_value_t = 8080)]
-    web_port: u16,
-
-    /// Base path for web server (e.g. "/air-predictor")
-    #[arg(long, default_value = "/")]
-    web_base_path: String,
 }
 
 pub async fn fetch_historical_measurements(
@@ -65,7 +37,6 @@ pub async fn fetch_historical_measurements(
 ) -> Result<Vec<MeasurementWithTime>, Box<dyn std::error::Error>> {
     let query_url = format!("{}/api/v3/query_sql?db={}", influx_host, influx_database);
     log::debug!("Query URL: {}", query_url);
-    // SQL query to get all measurements ordered by time
     let sql_query = r#"
         SELECT
             time,
@@ -134,8 +105,6 @@ pub async fn run_anomaly_test_matrix(
             .await?;
     log::info!("Fetched {} measurements for testing", measurements.len());
 
-    // Test different configuration combinations
-    // Simple rule-based thresholds
     let humidity_definite = [50.0, 55.0, 60.0];
     let humidity_suspicious = [60.0, 65.0, 70.0];
     let temp_above_daily_min = [6.0, 8.0, 10.0];
@@ -171,7 +140,6 @@ pub async fn run_anomaly_test_matrix(
                         measurement_name
                     );
 
-                    // Run analysis with this config
                     let result = anomalies::analyze_historical_data(&measurements, Some(config));
 
                     log::info!(
@@ -180,7 +148,6 @@ pub async fn run_anomaly_test_matrix(
                         result.sunlight_events
                     );
 
-                    // Write results
                     let anomaly_batch: Vec<_> = result
                         .anomaly_timestamps
                         .iter()
@@ -219,7 +186,6 @@ pub async fn mark_historical_data(
 
     log::info!("Received {} measurements", measurements.len());
 
-    // Use new multi-stage anomaly detection
     let result = anomalies::analyze_historical_data(&measurements, None);
 
     log::info!(
@@ -228,7 +194,6 @@ pub async fn mark_historical_data(
         result.sunlight_events
     );
 
-    // Write anomalies in batches
     let batch_size = 100;
     let anomaly_batch: Vec<_> = result
         .anomaly_timestamps
@@ -268,14 +233,11 @@ async fn save_anomalies_batch(
         return Ok(());
     }
 
-    // Build line protocol for all anomalies
     let mut line_protocol_lines = Vec::new();
 
     for (timestamp, flags, device) in anomalies {
-        // Convert timestamp to Unix nanoseconds
         let timestamp_nanos = timestamp.timestamp_nanos_opt().unwrap_or(0);
 
-        // Build line protocol: measurement,tags fields timestamp
         let line = format!(
             "{},device={} temperature_spike={},humidity_spike={},co2_spike={},physical_constraint_temp_violation={},physical_constraint_humidity_violation={},physical_constraint_co2_violation={},possible_sunlight={} {}",
             measurement_name,
@@ -292,12 +254,10 @@ async fn save_anomalies_batch(
         line_protocol_lines.push(line);
     }
 
-    // Join all lines with newlines
     let batch_body = line_protocol_lines.join("\n");
 
-    // Write to InfluxDB
     let response = reqwest_client
-        .post(&format!(
+        .post(format!(
             "{}/api/v3/write_lp?db={}",
             influx_host, influx_database
         ))
@@ -327,7 +287,6 @@ pub async fn delete_old_markings(
 ) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Deleting old anomaly markings from database...");
 
-    // 1. List all tables to find ones starting with "anomalies"
     let query_url = format!("{}/api/v3/query_sql?db={}", influx_host, influx_database);
     let sql_query = "SHOW TABLES";
 
@@ -357,10 +316,10 @@ pub async fn delete_old_markings(
 
     let mut tables_to_delete = Vec::new();
     for table in tables {
-        if let Some(name) = table.get("table_name").and_then(|v| v.as_str()) {
-            if name.starts_with("anomalies") {
-                tables_to_delete.push(name.to_string());
-            }
+        if let Some(name) = table.get("table_name").and_then(|v| v.as_str())
+            && name.starts_with("anomalies")
+        {
+            tables_to_delete.push(name.to_string());
         }
     }
 
@@ -406,28 +365,34 @@ pub async fn delete_old_markings(
     Ok(())
 }
 
+/// Configuration for connecting to InfluxDB
+pub struct InfluxConfig<'a> {
+    pub host: &'a str,
+    pub token: &'a str,
+    pub database: &'a str,
+    pub client: &'a reqwest::Client,
+}
+
 pub async fn save_measurement_to_influx(
-    influx_host: &str,
-    influx_token: &str,
-    influx_database: &str,
+    config: &InfluxConfig<'_>,
     device: &str,
     co2: u16,
     temperature: f32,
     humidity: f32,
-    reqwest_client: &reqwest::Client,
 ) {
     let line_protocol = format!(
         "scd40_data,device={} co2_ppm={},temperature_c={},humidity_percent={}",
         device, co2, temperature, humidity
     );
 
-    let response = reqwest_client
-        .post(&format!(
+    let response = config
+        .client
+        .post(format!(
             "{}/api/v3/write_lp?db={}",
-            influx_host, influx_database
+            config.host, config.database
         ))
         .body(line_protocol)
-        .bearer_auth(influx_token)
+        .bearer_auth(config.token)
         .send()
         .await
         .expect("Failed to send measurement to InfluxDB");
@@ -438,7 +403,6 @@ pub async fn save_measurement_to_influx(
             response.status(),
             response.text().await.expect("Failed to get response text")
         );
-    } else {
     }
 }
 
@@ -502,14 +466,16 @@ pub async fn receive_live_data(
                                             device: device.clone(),
                                         });
                                         save_measurement_to_influx(
-                                            &influx_host,
-                                            &influx_token,
-                                            &influx_database,
+                                            &InfluxConfig {
+                                                host: influx_host,
+                                                token: influx_token,
+                                                database: influx_database,
+                                                client: reqwest_client,
+                                            },
                                             device,
                                             co2,
                                             temperature,
                                             humidity,
-                                            &reqwest_client,
                                         )
                                         .await;
                                         info!("Measurement saved to InfluxDB");
@@ -663,38 +629,6 @@ async fn main() {
         {
             Ok(()) => log::info!("Old anomaly markings deleted successfully"),
             Err(e) => log::error!("Failed to delete old markings: {}", e),
-        }
-    }
-
-    if args.predict_weather {
-        log::info!("Predicting weather");
-        match predictor::predict_weather(
-            &influx_host,
-            &influx_token,
-            &influx_database,
-            &reqwest_client,
-            args.prediction_timestamp,
-        )
-        .await
-        {
-            Ok(()) => log::info!("Weather prediction complete"),
-            Err(e) => log::error!("Failed to predict weather: {}", e),
-        }
-    }
-
-    if args.web_server {
-        log::info!("Starting predictor web server on port {}", args.web_port);
-        match predictor_web::run_web_server(
-            influx_host.clone(),
-            influx_token.clone(),
-            influx_database.clone(),
-            args.web_port,
-            args.web_base_path,
-        )
-        .await
-        {
-            Ok(()) => log::info!("Web server stopped"),
-            Err(e) => log::error!("Web server failed: {}", e),
         }
     }
 

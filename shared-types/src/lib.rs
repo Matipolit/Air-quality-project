@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Main message envelope sent from ESP32 to server
+/// Main message envelope sent from measurement node to server
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DeviceMessage {
     /// Device identifier (e.g., "esp32-scd40")
@@ -28,7 +28,7 @@ impl DeviceMessage {
     }
 }
 
-/// Payload variants for messages from device
+/// Payload variants for messages from measurement node
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status")]
 pub enum DevicePayload {
@@ -79,10 +79,11 @@ pub enum DevicePayload {
     Alive { uptime_seconds: u64 },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "cmd")]
 pub enum DeviceCommand {
     #[serde(rename = "noop")]
+    #[default]
     NoOp,
 
     /// Start forced recalibration
@@ -103,12 +104,6 @@ pub enum DeviceCommand {
 
     #[serde(rename = "get_deep_sleep_time")]
     GetDeepSleepTime,
-}
-
-impl Default for DeviceCommand {
-    fn default() -> Self {
-        DeviceCommand::NoOp
-    }
 }
 
 fn default_frc_ppm() -> u16 {
